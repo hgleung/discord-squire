@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and training checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      # youtube-dl-exec and ffmpeg-static fetch binaries in postinstall, and the
+      # yt-dlp fetch goes through the GitHub releases API, which is rate limited
+      # for unauthenticated callers. Neither binary is needed to typecheck or to
+      # run the training checks, so skip install scripts on this path.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Training checks
+        run: npm run check:training
+
+      - name: Assistant checks
+        run: npm run check:assistant
+
+  music:
+    name: Music checks (live YouTube)
+    # These resolve real videos and stream real audio, so they need working
+    # network access to YouTube and fail for reasons that have nothing to do
+    # with a given change. They stay off the pull request path: run them from
+    # the Actions tab when the music module changes.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      # Full install here, because these checks do need the yt-dlp and ffmpeg
+      # binaries. GITHUB_TOKEN authenticates youtube-dl-exec's release lookup so
+      # it is not rate limited.
+      - name: Install dependencies with binaries
+        run: npm ci
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Music checks
+        run: npm run check:music

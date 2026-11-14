@@ -1,0 +1,43 @@
+{
+  "name": "squire",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "A personal Discord bot: chat assistant, training log, music, and whatever comes next.",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run check:training && npm run check:assistant && npm run check:music",
+    "check:training": "tsx src/modules/training/smoke.ts",
+    "check:music": "tsx src/modules/music/check.ts && tsx src/modules/music/queue.check.ts && tsx src/modules/music/loop.check.ts",
+    "web": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "check:assistant": "tsx src/modules/assistant/check.ts && tsx src/modules/assistant/google.check.ts",
+    "check:assistant:live": "tsx src/modules/assistant/live.ts",
+    "google:auth": "tsx src/modules/assistant/googleAuth.ts",
+    "training:import": "tsx src/modules/training/import.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
+    "@discordjs/voice": "^0.19.2",
+    "@huggingface/transformers": "4.3.2",
+    "date-fns": "^4.4.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "ffmpeg-static": "^5.3.0",
+    "google-auth-library": "^11.3.4",
+    "libsodium-wrappers": "^0.8.4",
+    "opusscript": "^0.0.8",
+    "uuid": "^14.0.1",
+    "yaml": "^2.9.1",
+    "youtube-dl-exec": "^3.1.15"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.13.3",
+    "tsx": "^4.19.2",
+    "typescript": "~6.0.2"
+  }
+}
