@@ -14,7 +14,7 @@ import youtubedl from 'youtube-dl-exec';
 import ffmpegPath from 'ffmpeg-static';
 import { ytdlpFlags } from '../music/player.js';
 import type { ImagePart, ToolHandler } from './llm.js';
-import { assertPublic, decodeEntities, findUrls, parseDiscordLink } from './links.js';
+import { assertPublic, decodeEntities, fetchImage, findUrls, parseDiscordLink, USER_AGENT } from './links.js';
 import { transcribe, transcriptionEnabled } from './transcribe.js';
 
 const run = promisify(execFile);
@@ -160,9 +160,77 @@ const reason = (err: unknown) => {
  * short. With no captions, the speech is transcribed on the PC instead.
  * `language` is the spoken language's English name, for transcription.
  */
+const TIKTOK_PHOTO = /^https?:\/\/(?:www\.|m\.)?tiktok\.com\/@([^/?#]+)\/photo\/(\d+)/i;
+const MAX_SLIDES = 12;
+
+/** Where a TikTok short link (vm.tiktok.com, tiktok.com/t/...) leads; other links come back as they are. */
+async function resolveTikTok(url: string): Promise<string> {
+  const u = new URL(url);
+  const short = /^v[mt]\.tiktok\.com$/i.test(u.hostname) || (/(^|\.)tiktok\.com$/i.test(u.hostname) && u.pathname.startsWith('/t/'));
+  if (!short) return url;
+  try {
+    const res = await fetch(u.href, { headers: { 'User-Agent': USER_AGENT }, redirect: 'manual', signal: AbortSignal.timeout(15_000) });
+    await res.body?.cancel().catch(() => {});
+    const location = res.headers.get('location');
+    return location ? new URL(location, u).href : url;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * The slides and caption of a TikTok photo post, from the page TikTok serves
+ * for it. yt-dlp doesn't read photo posts, and the /photo/ page comes back
+ * without the post's data, but the same id under /video/ has it.
+ */
+export function tiktokSlides(html: string): { caption?: string; author?: string; images: string[] } | undefined {
+  const json = html.match(/<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/)?.[1];
+  if (!json) return undefined;
+  try {
+    const item = JSON.parse(json)?.__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct;
+    const slides: unknown[] = Array.isArray(item?.imagePost?.images) ? item.imagePost.images : [];
+    const images = slides
+      .map((i) => (i as { imageURL?: { urlList?: unknown[] } })?.imageURL?.urlList?.[0])
+      .filter((u): u is string => typeof u === 'string' && u.startsWith('https://'));
+    if (!images.length) return undefined;
+    return { caption: typeof item.desc === 'string' ? item.desc : undefined, author: item.author?.uniqueId, images };
+  } catch {
+    return undefined;
+  }
+}
+
+async function readTikTokPhotos(user: string, id: string): Promise<{ content: string; images: ImagePart[] }> {
+  const page = `https://www.tiktok.com/@${user}/video/${id}`;
+  const res = await fetch(page, { headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'en-US,en;q=0.9' }, signal: AbortSignal.timeout(20_000) });
+  if (!res.ok) throw new Error(`Couldn't read that TikTok photo post: HTTP ${res.status}`);
+  const post = tiktokSlides(await res.text());
+  if (!post) throw new Error("Couldn't read that TikTok photo post: TikTok didn't send its slides. Ask for screenshots of them.");
+  const images: ImagePart[] = [];
+  const failed: number[] = [];
+  for (const [n, url] of post.images.slice(0, MAX_SLIDES).entries()) {
+    try {
+      const img = await fetchImage(url);
+      images.push({ type: 'image', url, mimeType: img.mimeType, data: img.data });
+    } catch {
+      failed.push(n + 1);
+    }
+  }
+  if (!images.length) throw new Error("Couldn't download that TikTok photo post's slides. Ask for screenshots of them.");
+  const lines = [
+    `TikTok photo post by @${post.author ?? user}, ${post.images.length} slides.`,
+    `Caption: ${post.caption?.trim() || '(none)'}`,
+    `${images.length} slides are attached in order: read the text on each one.`,
+  ];
+  if (post.images.length > MAX_SLIDES) lines.push(`(Only the first ${MAX_SLIDES} slides are attached.)`);
+  if (failed.length) lines.push(`(Slides ${failed.join(', ')} couldn't be downloaded.)`);
+  return { content: lines.join('\n'), images };
+}
+
 export async function readVideo(url: string, language?: string): Promise<{ content: string; images: ImagePart[] }> {
   // yt-dlp opens any page it's given; keep it off the home network.
   await assertPublic(new URL(url));
+  const photo = (await resolveTikTok(url)).match(TIKTOK_PHOTO);
+  if (photo) return readTikTokPhotos(photo[1]!, photo[2]!);
   let info: VideoInfo;
   try {
     info = (await youtubedl(url, { ...ytdlpFlags(), dumpSingleJson: true, skipDownload: true, noPlaylist: true })) as unknown as VideoInfo;
@@ -233,7 +301,9 @@ export async function readVideo(url: string, language?: string): Promise<{ conte
 }
 
 export const VIDEO_PROMPT = `
-- Video links (YouTube, Instagram reels, TikTok and the like) open with watch_video, which gives the title, creator, description or caption, a transcript (from captions, or transcribed from the audio on the PC when there are none), and a few frames from short videos. For a recipe, put it together from all of them: creators often list ingredients in the description or on screen and only say the steps. A transcript made on the PC can mishear names and amounts, so prefer what's written on screen or in the caption when they disagree. If the caption or title shows the video isn't in English, pass that language to watch_video. Say plainly what's missing (no amounts given, no speech) instead of inventing it.`;
+- Video links (YouTube, Instagram reels, TikTok and the like) open with watch_video, which gives the title, creator, description or caption, a transcript (from captions, or transcribed from the audio on the PC when there are none), and a few frames from short videos. For a recipe, put it together from all of them: creators often list ingredients in the description or on screen and only say the steps. A transcript made on the PC can mishear names and amounts, so prefer what's written on screen or in the caption when they disagree. TikTok photo posts (slideshows) open with watch_video too and come back as the slides, so read the text on them. If the caption or title shows the video isn't in English, pass that language to watch_video. Say plainly what's missing (no amounts given, no speech) instead of inventing it.
+- When they share a video, open it with watch_video in that reply before saying anything about what's in it. Prices, dishes and amounts come only from what watch_video returned, never from what's typical or from an earlier reply.
+- A recipe video shared without other instructions is for saving: save it with their other recipe notes in that reply, marking anything the video leaves out ("amounts not given"), then offer to fill the gap. Don't ask first whether to save it.`;
 
 export function videoTools(): ToolHandler[] {
   return [
@@ -241,7 +311,7 @@ export function videoTools(): ToolHandler[] {
       def: {
         name: 'watch_video',
         description:
-          'Read a video link (YouTube, Instagram, TikTok, and most other video sites): title, creator, description or caption, a transcript (from its captions, or transcribed from the audio when it has none), and 8 frames to read on-screen text from (for videos up to 4 minutes, or 15 when there are no captions).',
+          'Read a video link (YouTube, Instagram, TikTok including photo posts, and most other video sites): title, creator, description or caption, a transcript (from its captions, or transcribed from the audio when it has none), and 8 frames to read on-screen text from (for videos up to 4 minutes, or 15 when there are no captions).',
         strict: true,
         input_schema: {
           type: 'object',

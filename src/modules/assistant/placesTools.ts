@@ -46,7 +46,9 @@ Saved places:
     (opts.readOnly
       ? ''
       : `
-- places_add saves a spot to Squire's copy of a list only; Google Maps itself can't be changed from here. Say that once when you add one, so they can save it in Maps too if they want it on their phone.`);
+- When they share a place (a reel, a link, a name) without saying what to do, save it with places_add right away, to the existing list that fits. Don't start a new list unless they ask for one, by name or by where it goes.
+- Set near to the city or area the post names; left empty it searches near home. If the post gives an address, or the match isn't the place the post means, search by that address instead of the name.
+- places_add saves to Squire's copy only: Google has no way to write to Maps lists. Give the place's Maps link so they can tap Save on their phone, and mention the Squire-only part once in a conversation, not with every place.`);
 }
 
 export function placesTools(
