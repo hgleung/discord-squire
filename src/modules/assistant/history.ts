@@ -76,6 +76,24 @@ export function unanswered(lines: ChatLine[], opts: Pick<HistoryOptions, 'botId'
  * the assistant remembers. Each user turn is stamped with its local time and
  * channel so "in 20 minutes" and "tomorrow" have something to count from.
  */
+/** How long after it was sent an answered screenshot is still shown to the model. */
+const RECENT_IMAGE_MS = 15 * 60_000;
+
+const hasImages = (l: ChatLine) => (l.images?.length ?? 0) > 0 || l.attachments.some((a) => IMAGE_TYPES.has(a.contentType?.split(';')[0] ?? ''));
+
+/**
+ * The owner's last already-answered message with images, if it's recent. It
+ * stays visible so "open the link in my screenshot" right after still has the
+ * screenshot to read; older ones are only named, to keep the request small.
+ */
+export function recentScreenshot(lines: ChatLine[], opts: Pick<HistoryOptions, 'botId' | 'userId'>): ChatLine | undefined {
+  const threaded = threadReplies(lines, opts.botId);
+  const lastBot = threaded.findLastIndex((l) => l.authorId === opts.botId && l.content.trim());
+  const newestAt = Math.max(...lines.map((l) => l.createdAt.getTime()));
+  const shot = threaded.findLast((l, i) => i <= lastBot && l.authorId === opts.userId && hasImages(l));
+  return shot && newestAt - shot.createdAt.getTime() <= RECENT_IMAGE_MS ? shot : undefined;
+}
+
 export function buildConversation(lines: ChatLine[], opts: HistoryOptions): Turn[] {
   if (lines.length === 0) return [];
   const newestAt = Math.max(...lines.map((l) => l.createdAt.getTime()));
@@ -87,6 +105,7 @@ export function buildConversation(lines: ChatLine[], opts: HistoryOptions): Turn
   // Images are shown for the owner's lines the bot hasn't answered yet; older
   // ones are only named, to keep the request small.
   const lastBot = kept.findLastIndex((l) => l.authorId === opts.botId && l.content.trim());
+  const shot = recentScreenshot(kept, opts);
 
   const turns: { role: 'user' | 'assistant'; blocks: UserPart[] }[] = [];
   for (const [i, line] of kept.entries()) {
@@ -98,7 +117,7 @@ export function buildConversation(lines: ChatLine[], opts: HistoryOptions): Turn
       const stamp = `[${toLocalShort(line.createdAt, opts.timeZone)} · #${opts.channelName}]`;
       const notes = (line.notes ?? []).map((n) => `\n[${n}]`).join('');
       blocks.push({ type: 'text', text: `${stamp} ${line.content}${files}${notes}`.trim() });
-      if (i > lastBot) {
+      if (i > lastBot || line === shot) {
         const images =
           line.images ??
           line.attachments.flatMap((a): ImagePart[] => {
@@ -108,8 +127,11 @@ export function buildConversation(lines: ChatLine[], opts: HistoryOptions): Turn
         blocks.unshift(...images);
       }
     } else {
-      if (!line.content.trim()) continue;
-      blocks.push({ type: 'text', text: line.content });
+      // Task reports and reminders ping the owner first; drop the mention so
+      // they start with their ✅/⏰ marker and read as the task's own post.
+      const text = line.content.replace(/^<@!?\d+>\s*/, '');
+      if (!text.trim()) continue;
+      blocks.push({ type: 'text', text });
     }
 
     const last = turns.at(-1);

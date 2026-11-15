@@ -195,6 +195,9 @@ export function mapsLink(cid: string | undefined, name: string, address?: string
 
 // --- geometry and hours ---
 
+/** How far from the area asked for an added place's match can be before it's taken for a namesake elsewhere. */
+export const MAX_ADD_KM = 20;
+
 export function distanceKm(a: LatLng, b: LatLng): number {
   const rad = (d: number) => (d * Math.PI) / 180;
   const h = Math.sin(rad(b.lat - a.lat) / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(rad(b.lng - a.lng) / 2) ** 2;
@@ -478,6 +481,15 @@ export class SavedPlaces {
     if (!this.api) throw new Error('Adding a place needs GOOGLE_MAPS_API_KEY so Squire can look it up.');
     const hit = await this.api.find(query, near ?? (await this.home()));
     if (!hit) throw new Error(`Google found nothing for "${query}". Add the city or street.`);
+    // The search is only biased to the area, so a name Google doesn't know can
+    // land on a namesake in another city. Don't save that pin.
+    const off = near && hit.location ? distanceKm(near, hit.location) : 0;
+    if (off > MAX_ADD_KM) {
+      throw new Error(
+        `Not saved: Google's best match for "${query}" is ${hit.name}, ${hit.address ?? 'no address'}, ${Math.round(off)} km from the area searched, so it's probably a different place. ` +
+          'Search again with the street address from the post as the query, or a fuller name. If that really is the place, search again with near set to its own area.',
+      );
+    }
     // A synced entry may not have been looked up yet (no placeId), so also match
     // the same name at the same spot.
     const same = (p: SavedPlace) =>

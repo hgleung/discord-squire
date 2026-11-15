@@ -7,7 +7,7 @@ import { AnthropicLLM } from './anthropic.js';
 import { GoogleAccount, type GoogleConfig } from './google.js';
 import type { Vault } from '../../vault.js';
 import type { TrainingService } from '../training/service.js';
-import { buildConversation, splitForDiscord, unanswered, type ChatLine } from './history.js';
+import { buildConversation, recentScreenshot, splitForDiscord, unanswered, type ChatLine } from './history.js';
 import { discordReader, openLinks } from './discordLinks.js';
 import { ReminderStore } from './reminders.js';
 import { TaskRunner, TaskStore } from './tasks.js';
@@ -138,7 +138,8 @@ export function assistantModule(opts: AssistantOptions): BotModule {
       const reader = discordReader(message.client, opts.ownerId, opts.timeZone);
       const ids = { botId: message.client.user.id, userId: message.author.id };
       const opened = new Map<string, ChatLine>();
-      for (const line of unanswered(lines, ids)) {
+      const shot = recentScreenshot(lines, ids);
+      for (const line of [...unanswered(lines, ids), ...(shot ? [shot] : [])]) {
         const m = recent.get(line.id!);
         if (m) opened.set(line.id!, await openLinks(m, line, reader));
       }

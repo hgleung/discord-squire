@@ -12,7 +12,7 @@ import { addLocalDays, toLocalIso } from './time.js';
 import { buildConversation, splitForDiscord, threadReplies, unanswered, type ChatLine } from './history.js';
 import { expandShortLink, fetchImage, fetchPage, findUrls, isDiscordCdn, isPrivateAddress, isShortLink, MAX_IMAGE_BYTES, parseDiscordLink, recipeFromHtml, resizedDiscordUrl, type Fetcher } from './links.js';
 import { linkTools } from './linkTools.js';
-import { captionText, describeVideo, pickCaptions, readVideo, videoTools } from './video.js';
+import { captionText, describeVideo, pickCaptions, readVideo, tiktokSlides, videoTools } from './video.js';
 import { cleanTranscript } from './transcribe.js';
 import { TaskRunner, TaskStore } from './tasks.js';
 import { profilePrompt, Sources, type Generation, type GenerateRequest, type LLM, type ModelOptions, type ToolCall, type Turn } from './llm.js';
@@ -119,6 +119,19 @@ check('newest image sits before its line, lines merged', lastParts.map((b) => b.
   check('unanswered lines are the ones after the last reply', unanswered(lines, { botId: 'bot', userId: 'me' }).map((x) => x.id).join(',') === '2');
   const reminderLast = buildConversation([l('1', 'me', 'hi', 0), l('2', 'bot', 'hey', 1, '1'), l('3', 'bot', '⏰ stretch', 60)], opts);
   check('a trailing reminder is dropped, not sent last', reminderLast.at(-1)?.role === 'user');
+  // A follow-up about a screenshot sent a minute ago needs the screenshot
+  // still visible to the model.
+  const shot = { url: 'https://cdn/s.jpg', contentType: 'image/jpeg', name: 's.jpg' };
+  const imageCount = (t: Turn[]) => t.flatMap((x) => (x.role === 'user' ? x.content : [])).filter((b) => b.type === 'image').length;
+  const recentShot = buildConversation([{ ...l('1', 'me', '', 0), attachments: [shot] }, l('2', 'bot', 'Got it.', 30, '1'), l('3', 'me', 'open the link in it', 90)], opts);
+  check('a screenshot from a minute ago is still shown', imageCount(recentShot) === 1, String(imageCount(recentShot)));
+  const oldShot = buildConversation([{ ...l('1', 'me', '', 0), attachments: [shot] }, l('2', 'bot', 'Got it.', 30, '1'), l('3', 'me', 'thanks', 3600)], opts);
+  check('an answered screenshot from an hour ago is only named', imageCount(oldShot) === 0, String(imageCount(oldShot)));
+  // A task report that pings the owner has to read as the task's own post,
+  // or the assistant takes it for an unsourced reply of its own.
+  const pinged = buildConversation([l('1', 'me', 'find amounts', 0), l('2', 'bot', '<@123> ✅ **Recipe amounts** — done', 60), l('3', 'me', 'save it', 70)], opts);
+  const pingedText = pinged[1]?.role === 'assistant' ? pinged[1].text : '';
+  check('a pinged task report starts with its marker', pingedText.startsWith('✅'), pingedText);
   const withNotes = buildConversation(
     [{ ...l('1', 'me', 'look https://t.co/x', 0), notes: ['https://t.co/x leads to https://pastebin.com/y'], images: [{ type: 'image', url: 'u', mimeType: 'image/png', data: 'AAAA' }] }],
     opts,
@@ -438,6 +451,16 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     check('removing a Google list entry is refused', fail('places_remove', { key: 'c1' }).includes('remove it there'));
     await tools.get('places_remove')!.run({ key: 'chat-1' });
     check('a chat-added place can be removed', !new SavedPlaces({ file: join(pdir, 'places.json'), listUrls: [] }).places().some((p) => p.key === 'chat-1'));
+    // A match far from the area asked for is probably a namesake elsewhere.
+    const here = { lat: 40, lng: -100 };
+    const fakeHit = (name: string, location: { lat: number; lng: number }) => ({ name, address: name, location, details: { placeId: name, fetchedAt: '' } });
+    const withApi = places as unknown as { api?: { find: (q: string) => Promise<unknown> } };
+    withApi.api = { find: async (q) => (q.startsWith('Far') ? fakeHit('Far Cafe', { lat: 41.5, lng: -90 }) : fakeHit('Near Cafe', { lat: 40.01, lng: -100.01 })) };
+    const farMatch = await places.add('Bars', 'Far Cafe', here).then(() => '', (err: Error) => err.message);
+    check('a match far from the area asked for is not saved', farMatch.startsWith('Not saved') && !places.places().some((p) => p.name.includes('Far')), farMatch);
+    const nearMatch = await places.add('Bars', 'Near Cafe', here);
+    check('a match in the area asked for is saved', nearMatch.name === 'Near Cafe');
+    withApi.api = undefined;
     let noKey = '';
     await places.add('Dessert', 'Mitchell\'s Ice Cream', undefined).catch((err: Error) => (noKey = err.message));
     check('adding without an API key says what is missing', noKey.includes('GOOGLE_MAPS_API_KEY'), noKey);
@@ -574,6 +597,13 @@ check('web search is localised to home', search.user_location?.city === 'Springf
   check('vtt captions lose timings, tags and repeats', captionText(vtt, 'vtt') === 'one cup sugar beat it', captionText(vtt, 'vtt'));
   const desc = describeVideo({ title: 'Cookies', uploader: 'Dished', duration: 50, description: '1/3 cup sugar', chapters: [{ title: 'mix', start_time: 75 }] }, undefined, 'none available');
   check('a video reads as title, creator, description and transcript', desc.includes('Video: Cookies') && desc.includes('By: Dished') && desc.includes('Length: 0:50') && desc.includes('- 1:15 mix') && desc.includes('1/3 cup sugar') && desc.includes('no captions'), desc);
+  // TikTok photo posts carry their slides and caption in the page data.
+  const ttPage = `<html><script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">${JSON.stringify({
+    __DEFAULT_SCOPE__: { 'webapp.video-detail': { itemInfo: { itemStruct: { desc: '#cafes', author: { uniqueId: 'someone' }, imagePost: { images: [{ imageURL: { urlList: ['https://p16.tiktokcdn-us.com/a.jpeg', 'https://p19.tiktokcdn-us.com/a.jpeg'] } }, { imageURL: { urlList: ['https://p16.tiktokcdn-us.com/b.jpeg'] } }] } } } } },
+  })}</script></html>`;
+  const slides = tiktokSlides(ttPage);
+  check('a TikTok photo post reads as its slides and caption', slides?.images.join(',') === 'https://p16.tiktokcdn-us.com/a.jpeg,https://p16.tiktokcdn-us.com/b.jpeg' && slides.caption === '#cafes' && slides.author === 'someone', JSON.stringify(slides));
+  check('a TikTok page without slides gives nothing', tiktokSlides('<html><script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">{"__DEFAULT_SCOPE__":{}}</script></html>') === undefined);
   check('a transcript of only sound tags means no speech', cleanTranscript(' Music') === '' && cleanTranscript('[Music] ♪ (applause)') === '' && cleanTranscript(' you') === '');
   const looped = cleanTranscript('오늘의 요리는! 물을 끓여줍니다. 고추장 양파 고추장, 고추장, 고추장, 고추장, 고추장, 고추장, 고추장, 고추장');
   check('a word Whisper loops on is collapsed', looped === '오늘의 요리는! 물을 끓여줍니다. 고추장 양파 고추장 [repeated]', looped);
