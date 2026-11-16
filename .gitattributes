@@ -1,0 +1,7 @@
+# Store text files with LF in the repo and check them out with the platform's
+# line endings. Without this, a Windows checkout shows every file as modified,
+# which blocks pulling updates.
+* text=auto
+
+*.png binary
+*.ico binary

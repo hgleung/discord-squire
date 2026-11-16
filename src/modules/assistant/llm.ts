@@ -109,6 +109,18 @@ export interface GenerateRequest {
  */
 export type StopReason = 'done' | 'tool_use' | 'pause' | 'refusal';
 
+/** What one API call used, for the activity log and /usage. */
+export interface Usage {
+  /** The model that answered, which can differ from the one asked for after a fallback. */
+  model: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  webSearches: number;
+  webFetches: number;
+}
+
 export interface Generation {
   stop: StopReason;
   /** The visible text of this turn. */
@@ -117,6 +129,8 @@ export interface Generation {
   sources: Sources;
   /** What to append to the conversation before calling again. */
   turn: AssistantTurn;
+  /** Tokens and server tool calls, when the provider reports them. */
+  usage?: Usage;
 }
 
 /** The model API. Holds its own client; the model is chosen per call. */
@@ -151,9 +165,12 @@ export async function runTools(
 export class Sources {
   /** url → title */
   readonly pages = new Map<string, string>();
+  /** url → title of pages web_fetch actually opened (not just found in a search). */
+  readonly opened = new Map<string, string>();
 
   merge(other: Sources) {
     for (const [url, title] of other.pages) this.pages.set(url, title);
+    for (const [url, title] of other.opened) this.opened.set(url, title);
   }
 
   /** A short "Sources:" footer; angle brackets stop Discord unfurling each link. */

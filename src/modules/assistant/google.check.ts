@@ -64,10 +64,36 @@ check('htmlToText decodes entities', html.includes('Tom & Jerry â€” <hi>'), JSON
 check('htmlToText makes list items lines', /one\n+two/.test(html), JSON.stringify(html));
 
 // --- tool sets ---
-const stub = { api: async () => ({}) } as unknown as GoogleAccount; // tool lists never call the API
+const stub = { name: 'main', extraMail: [], mailboxes() { return [this]; }, api: async () => ({}) } as unknown as GoogleAccount; // tool lists never call the API
 const names = (readOnly: boolean) => googleTools(stub, 'America/Los_Angeles', { readOnly }).map((t) => t.def.name).sort();
 check('readOnly exposes only the read tools', names(true).join() === 'calendar_events,gmail_read,gmail_search', names(true).join());
 check('full set has seven tools', names(false).length === 7, names(false).join());
+
+// --- a second Gmail account ---
+const box = (name: string, fail = false) =>
+  ({
+    name,
+    api: async (url: string) => {
+      if (fail) throw new Error('Google sign-in expired');
+      return url.endsWith('/messages') ? { messages: [{ id: `${name}1` }] } : { id: `${name}1`, threadId: 't', snippet: 'hi', payload: { headers: [{ name: 'Subject', value: `${name} mail` }] } };
+    },
+  }) as unknown as GoogleAccount;
+const work = box('work');
+const two = { ...box('main'), extraMail: [work], mailboxes: () => [two, work] } as unknown as GoogleAccount;
+const twoTools = googleTools(two, 'America/Los_Angeles', { readOnly: false });
+const searchTool = twoTools.find((t) => t.def.name === 'gmail_search')!;
+const searchSchema = searchTool.def.input_schema as { properties: Record<string, { enum?: string[] }>; required: string[] };
+check('two accounts: search takes an account, or all', searchSchema.required.includes('account') && searchSchema.properties.account?.enum?.join() === 'all,main,work', JSON.stringify(searchSchema));
+const both = String(await searchTool.run({ query: 'in:inbox', max: 5, account: 'all' }));
+check('two accounts: search all labels each line with its account', both.includes('[main] main1') && both.includes('[work] work1'), both);
+const onlyWork = String(await searchTool.run({ query: '', max: 5, account: 'work' }));
+check('two accounts: search one looks only there', onlyWork.includes('[work]') && !onlyWork.includes('[main]'), onlyWork);
+const broken = { ...box('main'), extraMail: [box('work', true)], mailboxes: () => [broken, box('work', true)] } as unknown as GoogleAccount;
+const partial = String(await googleTools(broken, 'America/Los_Angeles', { readOnly: true }).find((t) => t.def.name === 'gmail_search')!.run({ query: '', max: 5, account: 'all' }));
+check("two accounts: one failing doesn't hide the other", partial.includes('[main] main1') && partial.includes("[work] couldn't be searched"), partial);
+const readWork = String(await twoTools.find((t) => t.def.name === 'gmail_read')!.run({ id: 'work1', thread: false, account: 'work' }));
+check('two accounts: read goes to the named account', readWork.includes('work mail'), readWork);
+check('one account: no account argument', !('account' in ((googleTools(stub, 'America/Los_Angeles', { readOnly: true })[0]!.def.input_schema as { properties: object }).properties)));
 
 // --- calendar time zones ---
 // A Tokyo check-in at 4 PM is midnight in California; it should read as 16:00.
@@ -79,13 +105,18 @@ check('event in the owner zone has no zone label', home === 'Tue 8 Jun, 00:00 â€
 
 const sent: Record<string, unknown>[] = [];
 const recorder = {
+  name: 'main',
+  extraMail: [],
+  mailboxes() {
+    return [this];
+  },
   api: async (_url: string, init?: { body?: Record<string, unknown> }) => {
     if (init?.body) sent.push(init.body);
-    return { id: 'new', summary: 'Hotel stay', ...init?.body };
+    return { id: 'new', summary: 'Riverside Inn', ...init?.body };
   },
 } as unknown as GoogleAccount;
 const create = googleTools(recorder, 'America/Los_Angeles', { readOnly: false }).find((t) => t.def.name === 'calendar_create_event')!;
-const createArgs = { calendar_id: '', summary: 'Hotel stay', start: '2027-06-08T16:00:00+09:00', end: '2027-06-10T11:00:00+09:00', all_day: false, location: '', description: '' };
+const createArgs = { calendar_id: '', summary: 'Riverside Inn', start: '2027-06-08T16:00:00+09:00', end: '2027-06-10T11:00:00+09:00', all_day: false, location: '', description: '' };
 const created = String(await create.run({ ...createArgs, time_zone: 'Asia/Tokyo' }));
 const sentStart = sent.at(-1)?.start as { timeZone?: string } | undefined;
 check('create keeps the zone it is given', sentStart?.timeZone === 'Asia/Tokyo', JSON.stringify(sentStart));

@@ -94,6 +94,6 @@ export function trainingTools(training: TrainingService): ToolHandler[] {
 
 export const TRAINING_PROMPT = `
 Training log:
-- Your owner keeps a strength training log (the same one behind /today, /log, /split, the web app and the Squire/Training notes in their Obsidian vault). It is the source of truth for anything gym-related: what's planned today, what they lifted, weights to use, weekly volume. Read it with the training_ tools instead of guessing or relying on memory, and don't save workout numbers to memory — they're already in the log.
+- Your owner keeps a strength training log (the same one behind /today, /log, /split, the web app and the Training and Squire/Workouts notes in their Obsidian vault). It is the source of truth for anything gym-related: what's planned today, what they lifted, weights to use, weekly volume. Read it with the training_ tools instead of guessing or relying on memory, and don't save workout numbers to memory — they're already in the log.
 - When they report sets in chat ("bench 185x5, 185x5, 175x6"), log each one with training_log_set. If today has nothing loaded, load the right split first (training_splits, then training_load_split), or ask which one if it isn't obvious.
 - After logging, reply in a line: what was logged, and call out a new best if the tool reports one. Use their weight unit.`;

@@ -4,14 +4,17 @@
  * as needed, so every call here is just url + params.
  */
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { OAuth2Client } from 'google-auth-library';
 import type { ToolHandler } from './llm.js';
 import { gmailTools } from './gmailTools.js';
 import { calendarTools } from './calendarTools.js';
 
+/** What an extra mail-only account is signed in with. */
+export const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.compose'];
+
 export const GOOGLE_SCOPES = [
-  'https://www.googleapis.com/auth/gmail.readonly',
-  'https://www.googleapis.com/auth/gmail.compose',
+  ...GMAIL_SCOPES,
   'https://www.googleapis.com/auth/calendar.events',
   'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
 ];
@@ -20,14 +23,27 @@ export interface GoogleConfig {
   clientId: string;
   clientSecret: string;
   tokenFile: string;
+  /** More Gmail accounts to read (mail only; the calendar stays the main account's). */
+  extraMail?: { name: string; tokenFile: string }[];
 }
+
+/** An extra account's name: short, and not one the tools use for themselves. */
+export const MAILBOX_NAME = /^(?!(?:main|all)$)[a-z0-9][a-z0-9-]{0,19}$/;
+
+/** Where an extra account's sign-in is kept: data/google-token-<name>.json. */
+export const extraTokenFile = (name: string) => fileURLToPath(new URL(`../../../data/google-token-${name}.json`, import.meta.url));
 
 const REAUTH = 'Google sign-in expired or was revoked; run npm run google:auth.';
 
 export class GoogleAccount {
   private readonly client: OAuth2Client;
+  /** "main" for the account with the calendar, else its name from GOOGLE_EXTRA_ACCOUNTS. */
+  readonly name: string;
+  /** The extra Gmail accounts, hung off the main one so every Gmail tool sees them. */
+  readonly extraMail: GoogleAccount[] = [];
 
-  constructor(config: GoogleConfig) {
+  constructor(config: Pick<GoogleConfig, 'clientId' | 'clientSecret' | 'tokenFile'> & { name?: string }) {
+    this.name = config.name ?? 'main';
     let refreshToken: unknown;
     try {
       refreshToken = JSON.parse(readFileSync(config.tokenFile, 'utf8')).refresh_token;
@@ -35,10 +51,15 @@ export class GoogleAccount {
       // Missing or unreadable file: same fix as an empty one.
     }
     if (typeof refreshToken !== 'string' || !refreshToken) {
-      throw new Error(`No Google token in ${config.tokenFile}; run npm run google:auth.`);
+      throw new Error(`No Google token in ${config.tokenFile}; run npm run google:auth${config.name ? ` -- ${config.name}` : ''}.`);
     }
     this.client = new OAuth2Client({ clientId: config.clientId, clientSecret: config.clientSecret });
     this.client.setCredentials({ refresh_token: refreshToken });
+  }
+
+  /** Every Gmail account, main first. */
+  mailboxes(): GoogleAccount[] {
+    return [this, ...this.extraMail];
   }
 
   async api<T>(
@@ -91,8 +112,15 @@ Gmail and Calendar:
 - You can read the owner's Gmail and Google Calendar. Use them for anything about email, receipts, orders, bookings, "when's my flight", what's on their schedule, or whether they're free.
 - gmail_search takes Gmail query syntax: from:amy, subject:invoice, newer_than:7d, has:attachment, in:inbox, is:unread, combined freely. Search, then gmail_read the one that matters.
 - You can save drafts but never send; the owner sends from Gmail. When you draft, say who it's to and that it's in Drafts.
+- For a trip or anything planned ahead, search the calendar months out (up to a year), with the place names, hotel or airline rather than "trip" (the match is literal: "Tokyo|Osaka|Japan"). Their notes may have it too. Only say it isn't on the calendar after that.
 - Create calendar events when asked. Confirm any calendar change in one line with the local day and time. Delete an event only when they explicitly ask.
 ${UNTRUSTED}`;
+
+/** A line naming the Gmail accounts, when there's more than one. */
+export function mailboxPrompt(account: GoogleAccount): string {
+  if (!account.extraMail.length) return '';
+  return `\n- They have ${account.mailboxes().length} Gmail accounts: ${account.mailboxes().map((m) => m.name).join(', ')} (the calendar is main's). gmail_search looks in all of them unless you pick one; each result starts with its account, and gmail_read and gmail_create_draft take that account. Say which account a message is in when it matters.`;
+}
 
 export const GOOGLE_TASK_PROMPT = `
 Gmail and Calendar:

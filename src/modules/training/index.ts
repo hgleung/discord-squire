@@ -8,14 +8,16 @@ import { buildWeekInput, generateWeekSummary } from '../../../lib/weekSummary.js
 import type { PlanData } from '../../../lib/types.js';
 
 export interface TrainingOptions {
-  /** The training folder in the vault, e.g. ".../Vault/Squire/Training". */
+  /** The training folder in the vault (Training.md and Splits/), e.g. ".../Vault/Training". */
   trainingDir: string;
+  /** Where the workout notes go, e.g. ".../Vault/Squire/Workouts"; Workouts/ in the training folder by default. */
+  workoutsDir?: string;
   ollamaHost: string;
   ollamaModel: string;
 }
 
 export function trainingModule(opts: TrainingOptions): BotModule & { store: PlanStore; service: TrainingService } {
-  const store = new PlanStore(opts.trainingDir);
+  const store = new PlanStore(opts.trainingDir, opts.workoutsDir);
   const service = new TrainingService(store);
   const today = () => service.today();
   const ensurePlan = () => service.ensurePlan();
@@ -109,7 +111,7 @@ export function trainingModule(opts: TrainingOptions): BotModule & { store: Plan
     name: 'training',
     commands: [todayCmd, log, split, splits, week],
     describe: () => [
-      `Training log         ${store.file}${store.exists() ? '' : '  (will be created on first save)'}`,
+      `Training log         ${store.file}, workouts in ${store.workoutsFolder}${store.exists() ? '' : '  (will be created on first save)'}`,
       `Summaries            ${opts.ollamaModel} via ${opts.ollamaHost}`,
     ],
     store,

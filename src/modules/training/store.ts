@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import type { PlanData } from '../../../lib/types.js';
 import { parsePlanData } from '../../../lib/planFile.js';
 import { writeIfChanged } from '../../vault.js';
@@ -16,7 +16,9 @@ export class RevisionConflictError extends Error {
 }
 
 /**
- * The single owner of the training folder in the vault. Every writer — the web
+ * The single owner of the training log in the vault: Training.md and Splits/
+ * in the training folder, and the workout notes in their own folder (by
+ * default Workouts/ inside the training folder). Every writer — the web
  * app over HTTP, the Discord bot in-process — goes through here, so there is
  * one place that decides who wins a conflict. The owner editing in Obsidian is
  * the other writer, and their edits are picked up as new revisions.
@@ -27,23 +29,36 @@ export class RevisionConflictError extends Error {
  */
 export class PlanStore extends EventEmitter {
   private readonly dir: string;
+  private readonly workoutsDir: string;
   private cached: PlanData | null = null;
   private revision = 0;
   /** (path, mtime, size) of every file last read or written; a mismatch means an outside edit. */
   private signature = '';
   /** Files that didn't parse. They're missing from the plan, so they must not be deleted for being absent from it. */
   private unreadable = new Set<string>();
-  private watcher: FSWatcher | undefined;
+  private watchers = new Map<string, FSWatcher>();
   private watchFailed = false;
   private debounce: NodeJS.Timeout | undefined;
 
-  constructor(dir: string) {
+  constructor(dir: string, workoutsDir?: string) {
     super();
     this.dir = resolve(dir);
+    this.workoutsDir = resolve(workoutsDir ?? join(dir, WORKOUTS));
     this.watch();
   }
 
-  /** The training folder. */
+  /** Absolute path of a log-relative one ("Training.md", "Splits/x.md", "Workouts/y.md"). */
+  private abs(rel: string): string {
+    return rel.startsWith(`${WORKOUTS}/`) ? join(this.workoutsDir, rel.slice(WORKOUTS.length + 1)) : join(this.dir, rel);
+  }
+
+  /** The folders to watch: the training folder, plus the workouts folder when it lives elsewhere. */
+  private watchedDirs(): string[] {
+    const inside = relative(this.dir, this.workoutsDir);
+    return inside && !inside.startsWith('..') && !inside.includes(`..${sep}`) ? [this.dir] : [this.dir, this.workoutsDir];
+  }
+
+  /** The training folder (Training.md and Splits/). */
   get file(): string {
     return this.dir;
   }
@@ -88,12 +103,18 @@ export class PlanStore extends EventEmitter {
     return this.cached!;
   }
 
-  /** Training.md plus the top level of Workouts/ and Splits/, folder-relative. */
+  /** The workout notes' folder. */
+  get workoutsFolder(): string {
+    return this.workoutsDir;
+  }
+
+  /** Training.md plus the top level of Workouts/ and Splits/, log-relative. */
   private files(): string[] {
     const out = existsSync(join(this.dir, TRAINING_NOTE)) ? [TRAINING_NOTE] : [];
     for (const folder of [WORKOUTS, SPLITS]) {
-      if (!existsSync(join(this.dir, folder))) continue;
-      for (const entry of readdirSync(join(this.dir, folder), { withFileTypes: true })) {
+      const path = folder === WORKOUTS ? this.workoutsDir : join(this.dir, folder);
+      if (!existsSync(path)) continue;
+      for (const entry of readdirSync(path, { withFileTypes: true })) {
         if (entry.isFile() && entry.name.endsWith('.md')) out.push(`${folder}/${entry.name}`);
       }
     }
@@ -103,7 +124,7 @@ export class PlanStore extends EventEmitter {
   private signatureOf(files: string[]): string {
     return files
       .map((rel) => {
-        const stat = statSync(join(this.dir, rel), { throwIfNoEntry: false });
+        const stat = statSync(this.abs(rel), { throwIfNoEntry: false });
         return `${rel}|${stat?.mtimeMs}|${stat?.size}`;
       })
       .join('\n');
@@ -124,7 +145,7 @@ export class PlanStore extends EventEmitter {
     for (const rel of files) {
       // Obsidian renames by delete-and-create, so a listed file can vanish before it's read.
       try {
-        contents.set(rel, readFileSync(join(this.dir, rel), 'utf8'));
+        contents.set(rel, readFileSync(this.abs(rel), 'utf8'));
       } catch {}
     }
     const { plan, failed } = parsePlan(contents, (m) => console.warn(`[training] ${m}`));
@@ -142,11 +163,11 @@ export class PlanStore extends EventEmitter {
     // unreadable on the next load, by which point the real log is gone.
     const files = renderPlan(parsePlanData(JSON.stringify(plan)));
 
-    for (const [rel, content] of files) writeIfChanged(join(this.dir, rel), content);
+    for (const [rel, content] of files) writeIfChanged(this.abs(rel), content);
     // Case-insensitive so a split renamed only in case isn't deleted after being written (Windows ignores case).
     const keep = new Set([...files.keys()].map((rel) => rel.toLowerCase()));
     for (const rel of this.files()) {
-      if (isOwnedFile(rel) && !keep.has(rel.toLowerCase()) && !this.unreadable.has(rel)) rmSync(join(this.dir, rel), { force: true });
+      if (isOwnedFile(rel) && !keep.has(rel.toLowerCase()) && !this.unreadable.has(rel)) rmSync(this.abs(rel), { force: true });
     }
 
     // Cache what a fresh load would see, ids included, so the cache always equals the disk.
@@ -165,21 +186,27 @@ export class PlanStore extends EventEmitter {
    */
   close(): void {
     clearTimeout(this.debounce);
-    this.watcher?.close();
-    this.watcher = undefined;
+    for (const w of this.watchers.values()) w.close();
+    this.watchers.clear();
     this.watchFailed = true;
   }
 
   /**
    * Notices Obsidian edits as they happen so an open web app updates live,
-   * not just on its next request. Started lazily because fs.watch needs the
-   * folder to exist. Our own writes come through here too, and are ignored
+   * not just on its next request. Started lazily, per folder, because
+   * fs.watch needs the folder to exist. Our own writes come through here too, and are ignored
    * because the signature already matches them.
    */
   private watch(): void {
-    if (this.watcher || this.watchFailed || !existsSync(this.dir)) return;
+    if (this.watchFailed) return;
+    for (const dir of this.watchedDirs()) {
+      if (!this.watchers.has(dir) && existsSync(dir)) this.watchDir(dir);
+    }
+  }
+
+  private watchDir(dir: string): void {
     try {
-      this.watcher = watch(this.dir, { recursive: true }, (_event, name) => {
+      const watcher = watch(dir, { recursive: true }, (_event, name) => {
         if (name?.endsWith('.tmp')) return;
         // Saves arrive as bursts of events; settle before re-reading.
         clearTimeout(this.debounce);
@@ -192,13 +219,14 @@ export class PlanStore extends EventEmitter {
         }, 300);
         this.debounce.unref();
       });
-      this.watcher.on('error', (err) => {
+      watcher.on('error', (err) => {
         // Typically the folder was deleted or moved; the next access starts a new watcher.
-        console.warn('[training] Watching the training folder failed:', err.message);
-        this.watcher?.close();
-        this.watcher = undefined;
+        console.warn(`[training] Watching ${dir} failed:`, err.message);
+        watcher.close();
+        this.watchers.delete(dir);
       });
-      this.watcher.unref();
+      watcher.unref();
+      this.watchers.set(dir, watcher);
     } catch (err) {
       // Without the watcher, outside edits still show up on the next request.
       this.watchFailed = true;

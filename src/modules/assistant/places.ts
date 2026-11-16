@@ -276,7 +276,7 @@ export class PlacesApi {
     return body.places ?? [];
   }
 
-  /** Where a free-text place or area is ("Union Square", "Chicago"); undefined when Google finds nothing. */
+  /** Where a free-text place or area is ("Union Square SF", "Chicago"); undefined when Google finds nothing. */
   async locate(query: string, near?: LatLng): Promise<(LatLng & { label: string }) | undefined> {
     const [hit] = await this.search(query, LOCATION_FIELDS, near, 50_000);
     if (!hit?.location) return undefined;

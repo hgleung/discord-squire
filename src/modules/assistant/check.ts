@@ -12,19 +12,29 @@ import { addLocalDays, toLocalIso } from './time.js';
 import { buildConversation, splitForDiscord, threadReplies, unanswered, type ChatLine } from './history.js';
 import { expandShortLink, fetchImage, fetchPage, findUrls, isDiscordCdn, isPrivateAddress, isShortLink, MAX_IMAGE_BYTES, parseDiscordLink, recipeFromHtml, resizedDiscordUrl, type Fetcher } from './links.js';
 import { linkTools } from './linkTools.js';
-import { captionText, describeVideo, pickCaptions, readVideo, tiktokSlides, videoTools } from './video.js';
+import { messageAttachments, messageText } from './discordLinks.js';
+import { captionText, describeVideo, pickCaptions, readVideo, tiktokSlides, instagramSlides, videoTools } from './video.js';
 import { cleanTranscript } from './transcribe.js';
 import { TaskRunner, TaskStore } from './tasks.js';
 import { profilePrompt, Sources, type Generation, type GenerateRequest, type LLM, type ModelOptions, type ToolCall, type Turn } from './llm.js';
-import { fromMessage, limitStrict, MAX_STRICT_TOOLS, toMessages, webTools } from './anthropic.js';
+import Anthropic from '@anthropic-ai/sdk';
+import { fromMessage, grammarTooLarge, limitStrict, MAX_STRICT_SCHEMA_CHARS, MAX_STRICT_TOOLS, toMessages, webTools } from './anthropic.js';
 import { MemoryStore } from './memory.js';
 import { notesTools } from './notes.js';
+import { ReadLog, pageKey } from './readLog.js';
 import { trainingTools } from './trainingTools.js';
 import { TrainingService } from '../training/service.js';
 import { PlanStore } from '../training/store.js';
 import { Vault } from '../../vault.js';
 import { isOpenAt, mapsLink, parseListResponse, SavedPlaces, todaysHours, type PlaceDetails } from './places.js';
 import { placesTools } from './placesTools.js';
+import { Journal, journalTools, parseSummary, splitSessions, summarize, type JournalLine } from './journal.js';
+import { Agent, withRelated } from './agent.js';
+import { ActivityLog, newTrace, traceTools } from './activity.js';
+import { addUsage, costUsd, dollars, noUsage } from './usage.js';
+import { reviewDigest, usageSummary } from './report.js';
+import { BriefState, briefChannel, briefFacts, dropMissingNotes } from './brief.js';
+import { rememberTranscript, voiceLine } from './voice.js';
 
 let failures = 0;
 const check = (label: string, ok: boolean, detail = '') => {
@@ -119,17 +129,17 @@ check('newest image sits before its line, lines merged', lastParts.map((b) => b.
   check('unanswered lines are the ones after the last reply', unanswered(lines, { botId: 'bot', userId: 'me' }).map((x) => x.id).join(',') === '2');
   const reminderLast = buildConversation([l('1', 'me', 'hi', 0), l('2', 'bot', 'hey', 1, '1'), l('3', 'bot', '⏰ stretch', 60)], opts);
   check('a trailing reminder is dropped, not sent last', reminderLast.at(-1)?.role === 'user');
-  // A follow-up about a screenshot sent a minute ago needs the screenshot
-  // still visible to the model.
+  // Seen in #recipes, Nov 14: "there's a link in my screenshot, open that" a
+  // minute after the screenshot, which the model could no longer see.
   const shot = { url: 'https://cdn/s.jpg', contentType: 'image/jpeg', name: 's.jpg' };
   const imageCount = (t: Turn[]) => t.flatMap((x) => (x.role === 'user' ? x.content : [])).filter((b) => b.type === 'image').length;
   const recentShot = buildConversation([{ ...l('1', 'me', '', 0), attachments: [shot] }, l('2', 'bot', 'Got it.', 30, '1'), l('3', 'me', 'open the link in it', 90)], opts);
   check('a screenshot from a minute ago is still shown', imageCount(recentShot) === 1, String(imageCount(recentShot)));
   const oldShot = buildConversation([{ ...l('1', 'me', '', 0), attachments: [shot] }, l('2', 'bot', 'Got it.', 30, '1'), l('3', 'me', 'thanks', 3600)], opts);
   check('an answered screenshot from an hour ago is only named', imageCount(oldShot) === 0, String(imageCount(oldShot)));
-  // A task report that pings the owner has to read as the task's own post,
-  // or the assistant takes it for an unsourced reply of its own.
-  const pinged = buildConversation([l('1', 'me', 'find amounts', 0), l('2', 'bot', '<@123> ✅ **Recipe amounts** — done', 60), l('3', 'me', 'save it', 70)], opts);
+  // Seen in #recipes, Nov 14: a pinged task report read as the bot's own
+  // unsourced reply, and the assistant disowned the task's work.
+  const pinged = buildConversation([l('1', 'me', 'find amounts', 0), l('2', 'bot', '<@123> ✅ **Kai Jeow amounts** — done', 60), l('3', 'me', 'save it', 70)], opts);
   const pingedText = pinged[1]?.role === 'assistant' ? pinged[1].text : '';
   check('a pinged task report starts with its marker', pingedText.startsWith('✅'), pingedText);
   const withNotes = buildConversation(
@@ -172,7 +182,18 @@ check('newest image sits before its line, lines merged', lastParts.map((b) => b.
     ],
   } as never);
   check('anthropic: reply parsed into text, calls, sources', gen.stop === 'tool_use' && gen.calls[0]?.id === 't9' && gen.sources.pages.get('https://a.example') === 'A');
+
+  const fetched = fromMessage({
+    stop_reason: 'end_turn',
+    content: [
+      { type: 'web_fetch_tool_result', tool_use_id: 'f1', content: { type: 'web_fetch_result', url: 'https://cook.example/curry', retrieved_at: null, content: { type: 'document', title: 'Curry', source: { type: 'text', media_type: 'text/plain', data: '' } } } },
+      { type: 'web_fetch_tool_result', tool_use_id: 'f2', content: { type: 'web_fetch_tool_result_error', error_code: 'url_not_accessible' } },
+      { type: 'text', text: 'Read it.' },
+    ],
+  } as never);
+  check('anthropic: pages web_fetch opened are tracked, failed ones not', fetched.sources.opened.size === 1 && fetched.sources.opened.get('https://cook.example/curry') === 'Curry', [...fetched.sources.opened.keys()].join(','));
 }
+
 
 // --- splitting ---
 check('short text is one message', splitForDiscord('hello').length === 1);
@@ -209,6 +230,8 @@ check(
     ];
     const seen: Turn[][] = [];
     const models: string[] = [];
+    const offered: string[][] = [];
+    const systems: string[] = [];
     const posts: { channelId: string; content: string; ping: boolean }[] = [];
     const tfile = join(tdir, 'tasks.json');
     const rstore = new ReminderStore(join(tdir, 'r.json'), LA);
@@ -218,6 +241,8 @@ check(
       async generate(model: ModelOptions, req: GenerateRequest) {
         seen.push(structuredClone(req.turns));
         models.push(model.model);
+        offered.push(req.tools?.map((t) => t.name) ?? []);
+        systems.push(req.system ?? '');
         const next = script.shift();
         if (!next) throw new Error('script ran out');
         return next;
@@ -257,6 +282,15 @@ check(
     check('task waits after wait_until', first.status === 'waiting' && first.wakeAt === later.toISOString(), first.status);
     check('progress update posted without a ping', posts.length === 1 && posts[0]!.content.includes('$912') && !posts[0]!.ping);
     const brief = JSON.stringify(seen[0]?.[0] ?? '');
+    const workerTools = offered[0] ?? [];
+    check(
+      'worker can read and write notes but not move or delete them',
+      ['save_note', 'read_note', 'search_notes', 'list_notes'].every((n) => workerTools.includes(n)) &&
+        !workerTools.includes('delete_note') &&
+        !workerTools.includes('move_note'),
+      workerTools.join(', '),
+    );
+    check('worker is told its report is posted and how to scale recipes', systems[0]!.includes('posted in the channel') && systems[0]!.includes('target ÷ source servings'));
     check('worker brief carries goal, end point and deadline', brief.includes('SEA→HND') && brief.includes('Done when') && brief.includes('Deadline'));
 
     // A restart while it waits: a fresh runner reads the same file.
@@ -313,6 +347,13 @@ check('web search is localised to home', search.user_location?.city === 'Springf
   check('no-input and read tools lose strict first', !out.slice(0, 4).some((t) => t.strict) && out[4]!.strict === true);
   const few = [tool('a'), tool('b')];
   check('under the cap nothing changes', limitStrict(few) === few);
+  // Too big to compile together, though under the count: the size budget decides.
+  const big = (name: string) => ({ ...tool(name), input_schema: { ...tool(name).input_schema, properties: { p: { description: 'x'.repeat(1400) } } } });
+  const sized = limitStrict([big('save_a'), big('save_b'), big('save_c'), big('save_d'), big('save_e'), tool('save_small')]);
+  const kept = sized.filter((t) => t.strict);
+  const keptSize = kept.reduce((n, t) => n + JSON.stringify(t.input_schema).length, 0);
+  check('strict schemas stay under the size budget', keptSize <= MAX_STRICT_SCHEMA_CHARS && kept.length === 5 && kept.at(-1)!.name === 'save_small', `${kept.length} kept, ${keptSize} chars`);
+  check('the grammar error is recognised', grammarTooLarge(new Anthropic.BadRequestError(400, { type: 'error', error: { type: 'invalid_request_error', message: 'The compiled grammar is too large, which would cause performance issues.' } }, 'The compiled grammar is too large, which would cause performance issues.', new Headers())) && !grammarTooLarge(new Error('grammar is too large')));
 }
 
 // --- memory ---
@@ -392,7 +433,7 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     name,
     note ?? '',
   ];
-  const payload = `)]}'\n${JSON.stringify([[null, null, null, null, 'Dessert', null, null, null, [entry('Corner Bakery', '600 Guerrero St, SF', 37.7614, -122.4241, 'morning bun'), entry('Scoop Shop', '3692 18th St, SF', 37.7616, -122.4257)]]])}`;
+  const payload = `)]}'\n${JSON.stringify([[null, null, null, null, 'Dessert', null, null, null, [entry('Tartine Bakery', '600 Guerrero St, SF', 37.7614, -122.4241, 'morning bun'), entry('Bi-Rite Creamery', '3692 18th St, SF', 37.7616, -122.4257)]]])}`;
   const parsed = parseListResponse(payload);
   check('shared list: title and places parsed', parsed.title === 'Dessert' && parsed.places.length === 2, JSON.stringify(parsed.places[0]));
   check('shared list: coordinates, address, note, cid', parsed.places[0]!.location?.lat === 37.7614 && parsed.places[0]!.note === 'morning bun' && parsed.places[0]!.cid === '0x80858:0x1a2b' && !parsed.places[1]!.note);
@@ -422,13 +463,13 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     const places = new SavedPlaces({ file: join(pdir, 'places.json'), listUrls: [] });
     places.store.data.lists = [{ url: 'u1', name: 'Dessert' }, { url: 'u2', name: 'Bars' }];
     places.store.data.places = [
-      { key: 'c1', list: 'Dessert', name: 'Corner Bakery', location: { lat: 37.7614, lng: -122.4241 }, note: 'morning bun', source: 'list', details: hours },
-      { key: 'c2', list: 'Dessert', name: 'Scoop Shop', location: { lat: 37.7616, lng: -122.4257 }, source: 'list' },
-      { key: 'c3', list: 'Bars', name: 'Night Owl', location: { lat: 37.759, lng: -122.4114 }, source: 'list', details: { ...hours, periods: [] } },
-      { key: 'chat-1', list: 'Dessert', name: 'Cocoa House', location: { lat: 37.7609, lng: -122.4214 }, source: 'chat' },
+      { key: 'c1', list: 'Dessert', name: 'Tartine Bakery', location: { lat: 37.7614, lng: -122.4241 }, note: 'morning bun', source: 'list', details: hours },
+      { key: 'c2', list: 'Dessert', name: 'Bi-Rite Creamery', location: { lat: 37.7616, lng: -122.4257 }, source: 'list' },
+      { key: 'c3', list: 'Bars', name: 'Trick Dog', location: { lat: 37.759, lng: -122.4114 }, source: 'list', details: { ...hours, periods: [] } },
+      { key: 'chat-1', list: 'Dessert', name: 'Dandelion Chocolate', location: { lat: 37.7609, lng: -122.4214 }, source: 'chat' },
     ];
     // "home" and a named area resolve from the remembered geocodes; no API here.
-    places.store.data.geocodes['central park'] = { lat: 37.7598, lng: -122.4271, label: 'Central Park' };
+    places.store.data.geocodes['mission dolores'] = { lat: 37.7598, lng: -122.4271, label: 'Mission Dolores, SF' };
     const tools = new Map(placesTools(places, LA, { clock: () => nov12 }).map((h) => [h.def.name, h]));
     const find = async (args: Record<string, unknown>) =>
       String(await tools.get('places_find')!.run({ list: '', text: '', near: '', within_km: 0, open_now: false, limit: 10, ...args }));
@@ -442,30 +483,133 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     };
 
     const dessert = await find({ list: 'des' });
-    check('a list prefix picks the list', dessert.includes('Corner Bakery') && !dessert.includes('Night Owl'), dessert);
-    check('the owner\'s note is searchable', (await find({ text: 'bun' })).startsWith('Corner Bakery'));
-    const near = await find({ near: 'Central Park', within_km: 0.4 });
-    check('near a place: nearest first, radius applied', near.split('\n')[1]?.startsWith('Scoop Shop') === true && !near.includes('Night Owl'), near);
+    check('a list prefix picks the list', dessert.includes('Tartine') && !dessert.includes('Trick Dog'), dessert);
+    check('the owner\'s note is searchable', (await find({ text: 'bun' })).startsWith('Tartine Bakery'));
+    const near = await find({ near: 'Mission Dolores', within_km: 0.4 });
+    check('near a place: nearest first, radius applied', near.split('\n')[1]?.startsWith('Bi-Rite') === true && !near.includes('Trick Dog'), near);
     const open = await find({ open_now: true });
-    check('open now keeps only known-open spots and counts the unknown', open.includes('Corner Bakery') && !open.includes('Scoop Shop') && open.includes('3 matching places left out'), open);
+    check('open now keeps only known-open spots and counts the unknown', open.includes('Tartine') && !open.includes('Bi-Rite') && open.includes('3 matching places left out'), open);
     check('removing a Google list entry is refused', fail('places_remove', { key: 'c1' }).includes('remove it there'));
     await tools.get('places_remove')!.run({ key: 'chat-1' });
     check('a chat-added place can be removed', !new SavedPlaces({ file: join(pdir, 'places.json'), listUrls: [] }).places().some((p) => p.key === 'chat-1'));
-    // A match far from the area asked for is probably a namesake elsewhere.
-    const here = { lat: 40, lng: -100 };
+    const unknownList = await Promise.resolve()
+      .then(() => tools.get('places_add')!.run({ list: 'Japan trip', query: 'Ichiran Shibuya Tokyo', near: '', note: '', new_list: false }))
+      .then(() => '', (err: Error) => err.message);
+    check('an unknown list is refused, naming the real ones', unknownList.includes('no "Japan trip" list') && unknownList.includes('Dessert, Bars'), unknownList);
+    // Seen in #misc, Nov 14: SF spots from a TikTok matched namesakes in San
+    // Jose, Burlingame and Sunnyvale and were saved anyway.
+    const sf = { lat: 37.7749, lng: -122.4194 };
     const fakeHit = (name: string, location: { lat: number; lng: number }) => ({ name, address: name, location, details: { placeId: name, fetchedAt: '' } });
     const withApi = places as unknown as { api?: { find: (q: string) => Promise<unknown> } };
-    withApi.api = { find: async (q) => (q.startsWith('Far') ? fakeHit('Far Cafe', { lat: 41.5, lng: -90 }) : fakeHit('Near Cafe', { lat: 40.01, lng: -100.01 })) };
-    const farMatch = await places.add('Bars', 'Far Cafe', here).then(() => '', (err: Error) => err.message);
-    check('a match far from the area asked for is not saved', farMatch.startsWith('Not saved') && !places.places().some((p) => p.name.includes('Far')), farMatch);
-    const nearMatch = await places.add('Bars', 'Near Cafe', here);
-    check('a match in the area asked for is saved', nearMatch.name === 'Near Cafe');
+    withApi.api = { find: async (q) => (q.startsWith('F1rst') ? fakeHit('The F1rst Take, San Jose', { lat: 37.3382, lng: -121.8863 }) : fakeHit('Bar Shoji, New Montgomery', { lat: 37.7867, lng: -122.3998 })) };
+    const farMatch = await places.add('Bars', 'F1rst Take', sf).then(() => '', (err: Error) => err.message);
+    check('a match far from the area asked for is not saved', farMatch.startsWith('Not saved') && farMatch.includes('San Jose') && !places.places().some((p) => p.name.includes('F1rst')), farMatch);
+    const nearMatch = await places.add('Bars', 'Shoji', sf);
+    check('a match in the area asked for is saved', nearMatch.name.startsWith('Bar Shoji'));
     withApi.api = undefined;
     let noKey = '';
     await places.add('Dessert', 'Mitchell\'s Ice Cream', undefined).catch((err: Error) => (noKey = err.message));
     check('adding without an API key says what is missing', noKey.includes('GOOGLE_MAPS_API_KEY'), noKey);
   } finally {
     rmSync(pdir, { recursive: true, force: true });
+  }
+}
+
+// --- the journal of past conversations ---
+{
+  const jdir = mkdtempSync(join(tmpdir(), 'squire-journal-'));
+  try {
+    const at = (iso: string) => new Date(iso);
+    const lines: JournalLine[] = [
+      { id: '1', fromOwner: true, at: at('2026-11-12T20:00:00Z'), text: 'book Sakura Hostel in Shibuya Jun 3-8' },
+      { id: '2', fromOwner: false, at: at('2026-11-12T20:01:00Z'), text: 'Done, saved to Travel/Japan.' },
+      { id: '3', fromOwner: true, at: at('2026-11-13T02:00:00Z'), text: 'riven for alex sunday' },
+    ];
+    const sessions = splitSessions(lines);
+    check('a long gap starts a new conversation', sessions.length === 2 && sessions[0]!.length === 2, String(sessions.map((s) => s.length)));
+    const parsed = parseSummary('Japan trip bookings: Sakura Hostel Jun 3-8 booked.\nONGOING 2027-06-12: Japan trip (Tokyo, Osaka)');
+    check('an ongoing plan is read off the last line', parsed?.ongoing?.until === '2027-06-12' && parsed.summary === 'Japan trip bookings: Sakura Hostel Jun 3-8 booked.', JSON.stringify(parsed));
+    check('SKIP keeps nothing', parseSummary('SKIP') === undefined && parseSummary('  ') === undefined);
+
+    const file = join(jdir, 'journal.json');
+    const journal = new Journal(file);
+    const entry = (n: number, summary: string, ongoing?: { until: string; topic: string }) => ({
+      channelId: 'c1',
+      channelName: n === 0 ? 'travel' : 'misc',
+      from: new Date(Date.UTC(2026, 10, 1 + n)).toISOString(),
+      to: new Date(Date.UTC(2026, 10, 1 + n, 1)).toISOString(),
+      summary,
+      ongoing,
+    });
+    journal.done('c1', '10', entry(0, 'Japan trip: Sakura Hostel Shibuya Jun 3-8, Riverside Inn Osaka Jun 8-10.', { until: '2027-06-12', topic: 'Japan trip' }));
+    for (let n = 1; n <= 8; n++) journal.done('c1', String(10 + n), entry(n, n === 1 ? 'Pickleball paddles compared: Joola Perseus.' : `Chat number ${n} about cards.`));
+    const reloaded = new Journal(file);
+    check('the journal and cursor survive a restart', reloaded.entries().length === 9 && reloaded.cursor('c1') === '18');
+    const now = new Date('2026-11-14T12:00:00Z');
+    const prompt = reloaded.prompt(LA, now);
+    check('an ongoing plan stays in the prompt past the recent few', prompt.includes('ongoing until 2027-06-12: Japan trip') && prompt.includes('Sakura'), prompt);
+    check('only the latest others are in the prompt', !prompt.includes('Pickleball') && prompt.includes('Chat number 8'), prompt);
+    const related = reloaded.related('which paddle did I like', LA, now);
+    check('an older conversation is found by its words', related.includes('Joola') && !related.includes('Sakura'), related);
+    check('nothing related, no note', reloaded.related('https://www.instagram.com/reel/abc', LA, now) === '');
+    check('a plan that has passed drops out', !reloaded.prompt(LA, new Date('2027-07-01T00:00:00Z')).includes('ongoing until'));
+    const recall = String(await journalTools(reloaded, LA)[0]!.run({ query: 'Osaka hotel' }));
+    check('recall searches every past conversation', recall.includes('Riverside Inn'), recall);
+    const turns = withRelated([{ role: 'user', content: [{ type: 'text', text: 'what paddle again?' }] }], reloaded, LA);
+    const last = turns.at(-1);
+    check('related conversations ride on the latest message', last?.role === 'user' && last.content.length === 2 && JSON.stringify(last.content[1]).includes('Joola'));
+
+    let summarySystem = '';
+    const summarizer: LLM = {
+      retryable: () => false,
+      async generate(_m, req) {
+        summarySystem = req.system + JSON.stringify(req.turns);
+        const text = 'Japan trip: booked Sakura.\nONGOING 2027-06-12: Japan trip';
+        return { stop: 'done', text, calls: [], sources: new Sources(), turn: { role: 'assistant', text } };
+      },
+    };
+    const summary = await summarize(summarizer, { model: 'm', effort: 'low' }, 'travel', sessions[0]!, LA);
+    check('a conversation is summarised from its transcript', summary?.ongoing?.topic === 'Japan trip' && summarySystem.includes('Owner: book Sakura') && summarySystem.includes('Squire: Done'), summarySystem.slice(-200));
+    check('no web tools when none are allowed', webTools('claude-haiku-5-5', 0).length === 0);
+  } finally {
+    rmSync(jdir, { recursive: true, force: true });
+  }
+}
+
+// --- recipes only from pages actually read ---
+{
+  const vdir = mkdtempSync(join(tmpdir(), 'squire-recipes-'));
+  try {
+    const vault = new Vault(vdir);
+    const reads = new ReadLog();
+    const tools = new Map(notesTools(vault, LA, reads).map((h) => [h.def.name, h]));
+    const save = async (args: Record<string, unknown>) => {
+      try {
+        return String(await tools.get('save_note')!.run({ mode: 'create', folder: 'Recipes/Meal', sources: [], ...args }));
+      } catch (err) {
+        return `ERR ${(err as Error).message}`;
+      }
+    };
+    check('reads: links match however they are written', pageKey('https://www.Cook.example/curry/?utm=1#x') === pageKey('http://cook.example/curry'));
+    check('recipe with no sources is refused', (await save({ title: 'Curry', content: '- 1 kg chicken' })).startsWith('ERR A recipe needs its sources'));
+    check('recipe citing a page never opened is refused', (await save({ title: 'Curry', content: '- 1 kg chicken', sources: ['https://cook.example/curry'] })).includes('never opened'));
+    const s = new Sources();
+    s.opened.set('https://cook.example/curry', 'Kerala Curry');
+    reads.recordFetches({ sources: s });
+    reads.recordTools(
+      [{ id: 'v', name: 'watch_video', input: { url: 'https://www.instagram.com/reel/abc/?igsh=x' } }, { id: 'p', name: 'fetch_page', input: { url: 'https://blocked.example/r' } }],
+      [{ callId: 'v', name: 'watch_video', content: 'Title: Ube muffins' }, { callId: 'p', name: 'fetch_page', content: 'HTTP 403', isError: true }],
+    );
+    const ok = await save({ title: 'Curry', content: '- 1 kg chicken', sources: ['https://www.cook.example/curry/'] });
+    const note = vault.read('Recipes/Meal/Curry.md') ?? '';
+    check('recipe from an opened page is saved with a linked Sources list', ok.startsWith('Saved') && note.includes('## Sources\n- [Kerala Curry](https://www.cook.example/curry/)'), note);
+    check('a watched video counts as read', (await save({ title: 'Muffins', content: '- ube', sources: ['https://instagram.com/reel/abc'] })).startsWith('Saved'));
+    check('a page that failed to open does not count', (await save({ title: 'R', content: 'x', sources: ['https://blocked.example/r'] })).includes('never opened'));
+    check('a recipe the owner gave needs no link', (await save({ title: 'Mine', content: 'x', sources: ['owner'] })).startsWith('Saved') && vault.read('Recipes/Meal/Mine.md')!.includes('From the owner'));
+    check('other notes need no sources', (await save({ title: 'Trip', content: 'x', folder: 'Travel' })).startsWith('Saved'));
+    check('appending to a recipe needs no sources', (await save({ title: 'Curry', content: 'Tip: rest it.', mode: 'append' })).startsWith('Appended'));
+  } finally {
+    rmSync(vdir, { recursive: true, force: true });
   }
 }
 
@@ -501,23 +645,38 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     const note = vault.read(inbox[0]!)!;
     check('append keeps what was there', note.startsWith('---\ncreated:') && note.includes('- 1 lb pork') && note.trimEnd().endsWith('- 2 tbsp gochujang'), note);
 
-    // Organising Squire: folders, moves, renames, trash.
+    // Organising the vault: folders, moves, renames, trash.
     await call('save_note', { title: 'Japan trip bookings', content: '- Tokyo stay booked', mode: 'create', folder: '' });
-    const moved = await call('move_note', { from: 'Inbox/Japan trip bookings.md', to: 'Travel/Japan' });
-    check('a note moved onto a new folder keeps its name', vault.read('Squire/Travel/Japan/Japan trip bookings.md')?.includes('Tokyo') === true && !vault.read('Squire/Inbox/Japan trip bookings.md'), moved);
-    await call('save_note', { title: 'Osaka', content: '- to book', mode: 'create', folder: 'Squire/Travel/Japan' });
-    check('save writes into a named folder', vault.read('Squire/Travel/Japan/Osaka.md')?.includes('to book') === true);
+    const moved = await call('move_note', { from: 'Squire/Inbox/Japan trip bookings.md', to: 'Travel/Japan' });
+    check('a note moved onto a new folder keeps its name', vault.read('Travel/Japan/Japan trip bookings.md')?.includes('Tokyo') === true && !vault.read('Squire/Inbox/Japan trip bookings.md'), moved);
+    await call('save_note', { title: 'Osaka', content: '- to book', mode: 'create', folder: '/Travel/Japan/' });
+    check('save writes into a named folder', vault.read('Travel/Japan/Osaka.md')?.includes('to book') === true);
     const tree = await call('list_notes', { folder: 'Travel' });
-    check('list shows subfolders and notes', tree.includes('Squire/Travel/Japan/') && tree.includes('Squire/Travel/Japan/Osaka.md'), tree);
+    check('list shows subfolders and notes', tree.startsWith('Travel/\n') && tree.includes('Travel/Japan/') && tree.includes('Travel/Japan/Osaka.md'), tree);
     await call('move_note', { from: 'Travel', to: 'Trips' });
-    check('a whole folder can be renamed', vault.list('Squire/Trips').length === 2 && vault.list('Squire/Travel').length === 0);
+    check('a whole folder can be renamed', vault.list('Trips').length === 2 && vault.list('Travel').length === 0);
     check('move refuses to overwrite', (await fail('move_note', { from: 'Trips/Japan/Osaka.md', to: 'Trips/Japan/Japan trip bookings.md' })).includes('already exists'));
-    check('move refuses to leave Squire', (await fail('move_note', { from: 'Trips/Japan/Osaka.md', to: '../notes/Osaka.md' })).includes('".."'));
-    vault.write('Squire/Training/log.md', 'x');
-    check('the training log is off limits', (await fail('move_note', { from: 'Training/log.md', to: 'Inbox' })).includes('training'));
+    check('move refuses to leave the vault', (await fail('move_note', { from: 'Trips/Japan/Osaka.md', to: '../Osaka.md' })).includes('".."'));
+    const whole = await call('list_notes', { folder: '' });
+    check('list shows the whole vault from the root, without dot-folders', whole.startsWith('the vault root\n') && whole.includes('  notes/cold brew.md') && whole.includes('  Trips/Japan/') && !whole.includes('.obsidian'), whole);
+    await call('move_note', { from: 'notes/cold brew.md', to: 'Recipes' });
+    check('notes outside the old Squire folder can be organised too', vault.read('Recipes/cold brew.md')?.includes('Filter twice.') === true);
+    await call('move_note', { from: 'Recipes/cold brew.md', to: '.obsidian' });
+    check("Obsidian's own folders stay out of reach", vault.read('obsidian/cold brew.md') !== undefined && vault.read('.obsidian/cold brew.md') === undefined);
+    check('the vault root cannot be deleted', (await fail('delete_note', { path: '' })).includes('vault root'));
+    check('the vault root cannot be moved', (await fail('move_note', { from: '/', to: 'Elsewhere' })).includes('vault root'));
+    vault.write('Training/Training.md', 'x');
+    vault.write('Squire/Workouts/2026-11-12 Workout.md', 'x');
+    check('the training log is off limits', (await fail('move_note', { from: 'Training/Training.md', to: 'Inbox' })).includes('training'));
     check('saving into the training log is refused', (await fail('save_note', { title: 'x', content: 'x', mode: 'create', folder: 'Training' })).includes('training'));
+    check('the workout notes are off limits', (await fail('delete_note', { path: 'Squire/Workouts/2026-11-12 Workout.md' })).includes('training'));
+    check('recipes are not saved under the bot folder', (await fail('save_note', { title: 'Pad See Ew', content: 'x', mode: 'create', folder: 'Squire/Recipes/Meal' })).includes('"Recipes/Meal"'));
+    check('notes are not moved under the bot folder', (await fail('move_note', { from: 'Trips/Japan/Osaka.md', to: 'Squire/Travel/Japan' })).includes('vault root'));
+    vault.write('Squire/Recipes/Meal/Pad See Ew.md', 'x');
+    await call('move_note', { from: 'Squire/Recipes/Meal/Pad See Ew.md', to: 'Recipes/Meal' });
+    check('a misplaced note can be moved out of the bot folder', vault.read('Recipes/Meal/Pad See Ew.md') === 'x');
     await call('delete_note', { path: 'Trips/Japan/Osaka.md' });
-    check('delete puts the note in Obsidian\'s trash', vault.read('.trash/Osaka.md')?.includes('to book') === true && !vault.read('Squire/Trips/Japan/Osaka.md'));
+    check('delete puts the note in Obsidian\'s trash', vault.read('.trash/Osaka.md')?.includes('to book') === true && !vault.read('Trips/Japan/Osaka.md'));
   } finally {
     rmSync(vdir, { recursive: true, force: true });
   }
@@ -560,16 +719,16 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     if (isPrivateAddress(u.hostname)) throw new Error(`${u.hostname} is a private address`);
   }))).includes('private'));
 
-  const recipePage = `<html><head><title>Beef Stew &amp; more</title>
-    <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebPage"},{"@type":["Recipe"],"name":"Beef stew","recipeYield":["4"],
+  const recipePage = `<html><head><title>Galbi Jjim &amp; more</title>
+    <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebPage"},{"@type":["Recipe"],"name":"Galbi jjim","recipeYield":["4"],
     "recipeIngredient":["2 pounds beef short ribs","&frac13; cup soy sauce"],
     "recipeInstructions":[{"@type":"HowToSection","name":"Ribs","itemListElement":[{"@type":"HowToStep","text":"Soak the ribs."},{"@type":"HowToStep","text":"Blanch them."}]}]}]}</script>
-    </head><body><nav>Home | Recipes</nav><script>var x = 1;</script><h1>Beef stew</h1><p>Braised short ribs.</p><ul><li>one</li><li>two</li></ul></body></html>`;
+    </head><body><nav>Home | Recipes</nav><script>var x = 1;</script><h1>Galbi jjim</h1><p>Braised short ribs.</p><ul><li>one</li><li>two</li></ul></body></html>`;
   const recipe = recipeFromHtml(recipePage);
-  check('a recipe is read from structured data', !!recipe && recipe.includes('Recipe: Beef stew') && recipe.includes('- 2 pounds beef short ribs') && recipe.includes('Ribs:') && recipe.includes('2. Soak the ribs.'), recipe);
-  const page = await fetchPage('https://recipes.example/stew', routes({ 'https://recipes.example/stew': () => reply(200, recipePage, { 'content-type': 'text/html; charset=utf-8' }) }), open);
-  check('a page comes back as title, recipe and text', page.includes('Title: Beef Stew & more') && page.includes('Recipe: Beef stew') && page.includes('Braised short ribs.') && page.includes('- one') && !page.includes('var x') && !page.includes('Home | Recipes'), page);
-  const blocked = await why(fetchPage('https://recipes.example/x', routes({ 'https://recipes.example/x': () => reply(403, '<title>Attention Required! | Cloudflare</title>', { 'content-type': 'text/html', server: 'cloudflare' }) }), open));
+  check('a recipe is read from structured data', !!recipe && recipe.includes('Recipe: Galbi jjim') && recipe.includes('- 2 pounds beef short ribs') && recipe.includes('Ribs:') && recipe.includes('2. Soak the ribs.'), recipe);
+  const page = await fetchPage('https://maangchi.example/galbi', routes({ 'https://maangchi.example/galbi': () => reply(200, recipePage, { 'content-type': 'text/html; charset=utf-8' }) }), open);
+  check('a page comes back as title, recipe and text', page.includes('Title: Galbi Jjim & more') && page.includes('Recipe: Galbi jjim') && page.includes('Braised short ribs.') && page.includes('- one') && !page.includes('var x') && !page.includes('Home | Recipes'), page);
+  const blocked = await why(fetchPage('https://maangchi.example/x', routes({ 'https://maangchi.example/x': () => reply(403, '<title>Attention Required! | Cloudflare</title>', { 'content-type': 'text/html', server: 'cloudflare' }) }), open));
   check('a bot check is reported plainly', blocked.includes('bot check') && blocked.includes('screenshot'), blocked);
 
   const names = (tools: ReturnType<typeof linkTools>) => tools.map((t) => t.def.name).join(',');
@@ -579,6 +738,24 @@ check('web search is localised to home', search.user_location?.city === 'Springf
   await withDiscord[1]!.run({ link: 'https://discord.com/channels/1/2/3', count: 500 });
   check('read_discord_messages caps the count', reads[0]?.messageId === '3' && reads[0].count === 100, JSON.stringify(reads));
   check('fetch_page sends Discord links to the other tool', (await why(Promise.resolve().then(() => withDiscord[0]!.run({ url: 'https://discord.com/channels/1/2/3' })))).includes('read_discord_messages'));
+}
+
+// --- forwarded messages ---
+{
+  const att = (name: string) => ({ name, url: `https://cdn.discordapp.com/attachments/1/2/${name}`, contentType: 'image/png' });
+  const coll = <T,>(items: T[]) => new Map(items.map((v, i) => [String(i), v]));
+  const forward = {
+    content: '',
+    attachments: coll([]),
+    embeds: [],
+    createdAt: new Date(),
+    messageSnapshots: coll([{ content: 'galbi jjim https://t.co/x', attachments: coll([att('card.png')]), embeds: [{ title: 'Galbi', description: null, url: 'https://maangchi.com/g' }], createdAt: new Date('2026-11-12T21:51:00Z') }]),
+  } as never;
+  const text = messageText(forward, LA);
+  check('a forward is written out, with when, files and previews', text === '[forwarded message from Thu 12 Nov, 13:51: galbi jjim https://t.co/x [attached: card.png] [preview: Galbi · https://maangchi.com/g]]', text);
+  check("a forward's attachments count as the message's", messageAttachments(forward).map((a) => a.name).join() === 'card.png');
+  const plain = { content: 'hi', attachments: coll([att('a.png')]), embeds: [], createdAt: new Date(), messageSnapshots: coll([]) } as never;
+  check('an ordinary message is unchanged', messageText(plain, LA) === 'hi' && messageAttachments(plain).length === 1);
 }
 
 // --- reading video links ---
@@ -597,13 +774,22 @@ check('web search is localised to home', search.user_location?.city === 'Springf
   check('vtt captions lose timings, tags and repeats', captionText(vtt, 'vtt') === 'one cup sugar beat it', captionText(vtt, 'vtt'));
   const desc = describeVideo({ title: 'Cookies', uploader: 'Dished', duration: 50, description: '1/3 cup sugar', chapters: [{ title: 'mix', start_time: 75 }] }, undefined, 'none available');
   check('a video reads as title, creator, description and transcript', desc.includes('Video: Cookies') && desc.includes('By: Dished') && desc.includes('Length: 0:50') && desc.includes('- 1:15 mix') && desc.includes('1/3 cup sugar') && desc.includes('no captions'), desc);
-  // TikTok photo posts carry their slides and caption in the page data.
+  // Seen in #misc, Nov 14: a TikTok photo post of SF places couldn't be read
+  // at all, and Harry had to screenshot every slide.
   const ttPage = `<html><script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">${JSON.stringify({
-    __DEFAULT_SCOPE__: { 'webapp.video-detail': { itemInfo: { itemStruct: { desc: '#cafes', author: { uniqueId: 'someone' }, imagePost: { images: [{ imageURL: { urlList: ['https://p16.tiktokcdn-us.com/a.jpeg', 'https://p19.tiktokcdn-us.com/a.jpeg'] } }, { imageURL: { urlList: ['https://p16.tiktokcdn-us.com/b.jpeg'] } }] } } } } },
+    __DEFAULT_SCOPE__: { 'webapp.video-detail': { itemInfo: { itemStruct: { desc: '#sf cafes', author: { uniqueId: 'y3on_hwa' }, imagePost: { images: [{ imageURL: { urlList: ['https://p16.tiktokcdn-us.com/a.jpeg', 'https://p19.tiktokcdn-us.com/a.jpeg'] } }, { imageURL: { urlList: ['https://p16.tiktokcdn-us.com/b.jpeg'] } }] } } } } },
   })}</script></html>`;
   const slides = tiktokSlides(ttPage);
-  check('a TikTok photo post reads as its slides and caption', slides?.images.join(',') === 'https://p16.tiktokcdn-us.com/a.jpeg,https://p16.tiktokcdn-us.com/b.jpeg' && slides.caption === '#cafes' && slides.author === 'someone', JSON.stringify(slides));
+  check('a TikTok photo post reads as its slides and caption', slides?.images.join(',') === 'https://p16.tiktokcdn-us.com/a.jpeg,https://p16.tiktokcdn-us.com/b.jpeg' && slides.caption === '#sf cafes' && slides.author === 'y3on_hwa', JSON.stringify(slides));
   check('a TikTok page without slides gives nothing', tiktokSlides('<html><script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">{"__DEFAULT_SCOPE__":{}}</script></html>') === undefined);
+  // An Instagram /p/ carousel came back as a playlist whose image slides had
+  // no video formats, so yt-dlp dropped them and the bot asked for screenshots.
+  const ig = (key = 'Instagram') => ({ extractor_key: key });
+  const carousel = instagramSlides({ ...ig(), _type: 'playlist', entries: [{ thumbnail: 'https://cdn.ig/1.jpg', formats: [] }, { thumbnail: 'https://cdn.ig/2.jpg', formats: [{}] }, null, { thumbnail: 'https://cdn.ig/4.jpg' }] });
+  check('an Instagram carousel reads as its slide pictures', carousel?.images.join(',') === 'https://cdn.ig/1.jpg,https://cdn.ig/2.jpg,https://cdn.ig/4.jpg' && carousel.videos.join() === '2' && carousel.missing.join() === '3', JSON.stringify(carousel));
+  check('a one-picture Instagram post reads as that picture', instagramSlides({ ...ig(), thumbnail: 'https://cdn.ig/p.jpg', formats: [] })?.images.join() === 'https://cdn.ig/p.jpg');
+  check('an Instagram reel still reads as a video', instagramSlides({ ...ig(), thumbnail: 'https://cdn.ig/r.jpg', formats: [{}] }) === undefined);
+  check('only Instagram posts read as slides', instagramSlides({ ...ig('Youtube'), thumbnail: 'https://i.ytimg.com/x.jpg', formats: [] }) === undefined);
   check('a transcript of only sound tags means no speech', cleanTranscript(' Music') === '' && cleanTranscript('[Music] ♪ (applause)') === '' && cleanTranscript(' you') === '');
   const looped = cleanTranscript('오늘의 요리는! 물을 끓여줍니다. 고추장 양파 고추장, 고추장, 고추장, 고추장, 고추장, 고추장, 고추장, 고추장');
   check('a word Whisper loops on is collapsed', looped === '오늘의 요리는! 물을 끓여줍니다. 고추장 양파 고추장 [repeated]', looped);
@@ -611,6 +797,118 @@ check('web search is localised to home', search.user_location?.city === 'Springf
   check('ordinary repeats are kept', cleanTranscript(real) === real && cleanTranscript('[Music] Add the flour.') === 'Add the flour.');
   check('the video tool refuses Discord links', (await Promise.resolve().then(() => videoTools()[0]!.run({ url: 'https://discord.com/channels/1/2/3' })).then(() => '', (e: Error) => e.message)).includes('read_discord_messages'));
   check('nothing on the local network is opened as a video', (await readVideo('http://192.168.1.10/cam').then(() => '', (e: Error) => e.message)).includes('private'));
+}
+
+// --- activity log, usage, review digest, voice notes, morning brief ---
+{
+  const adir = mkdtempSync(join(tmpdir(), 'squire-activity-'));
+  try {
+    const metered = fromMessage({
+      stop_reason: 'end_turn',
+      model: 'claude-haiku-5-5',
+      content: [{ type: 'text', text: 'hi', citations: null }],
+      usage: { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 5000, cache_creation_input_tokens: 0, server_tool_use: { web_search_requests: 2, web_fetch_requests: 1 } },
+    } as never);
+    check('anthropic: usage is read off the response', metered.usage?.input === 1000 && metered.usage.cacheRead === 5000 && metered.usage.webSearches === 2 && metered.usage.model === 'claude-haiku-5-5', JSON.stringify(metered.usage));
+    const haikuMillion = costUsd({ ...noUsage('claude-haiku-5-5'), input: 1_000_000 });
+    const sonnet = costUsd({ ...noUsage('claude-sonnet-5-5'), input: 100_000, output: 10_000, webSearches: 3 });
+    check('cost: Haiku 5.5 input at $0.10 per million', Math.abs(haikuMillion - 0.1) < 1e-9, String(haikuMillion));
+    check('cost: Sonnet 5.5 tokens plus searches', Math.abs(sonnet - (0.2 + 0.1 + 0.03)) < 1e-9, String(sonnet));
+    check('cost: usage adds up', addUsage({ ...noUsage('m'), input: 1 }, { ...noUsage('m'), input: 2, webSearches: 1 }).input === 3);
+    check('cost: tiny amounts show as <$0.01', dollars(0.004) === '<$0.01' && dollars(1.234) === '$1.23');
+
+    const log = new ActivityLog(adir, LA);
+    // 23:30 PST on the 14th and 00:30 PST on the 15th land in different files.
+    log.record({ at: '2026-11-15T07:30:00Z', kind: 'reply', outcome: 'ok', channel: 'food', ask: 'save tartine to dessert', tools: ['places_add'], usage: { ...noUsage('claude-haiku-5-5'), input: 20_000 } });
+    log.record({ at: '2026-11-15T08:30:00Z', kind: 'reply', outcome: 'error', channel: 'travel', ask: 'what time is my flight', error: 'overloaded', messageId: '123' });
+    const trace = newTrace();
+    traceTools(trace, [{ name: 'fetch_page', content: 'HTTP 403 Forbidden', isError: true }, { name: 'recall', content: 'ok' }]);
+    log.record({ at: '2026-11-15T09:00:00Z', kind: 'reply', outcome: 'ok', channel: 'food', ask: 'open the maangchi recipe', voice: true, tools: trace.tools });
+    log.record({ at: '2026-11-15T10:00:00Z', kind: 'task', outcome: 'ok', title: 'Kyoto hotels', calls: 12, usage: { ...noUsage('claude-sonnet-5-5'), input: 200_000, output: 20_000 } });
+    const files = (await import('node:fs')).readdirSync(adir).sort().join(',');
+    check('activity: one file per local day', files === '2026-11-14.jsonl,2026-11-15.jsonl', files);
+    const back = log.read(new Date('2026-11-15T08:00:00Z'), new Date('2026-11-16T00:00:00Z'));
+    check('activity: reads back a window, oldest first', back.map((e) => e.channel ?? e.kind).join(',') === 'travel,food,task', back.map((e) => e.channel ?? e.kind).join(','));
+    check('activity: cost is stored with each event', (back.find((e) => e.kind === 'task')?.costUsd ?? 0) > 0.5);
+    check('activity: a failed tool keeps its error', trace.tools.join('|') === 'fetch_page: HTTP 403 Forbidden|recall', trace.tools.join('|'));
+    log.prune(new Date('2027-06-01T00:00:00Z'));
+    check('activity: old days are pruned', (await import('node:fs')).readdirSync(adir).length === 0);
+
+    const all = [...back, { at: '2026-11-15T07:30:00Z', kind: 'reply' as const, outcome: 'ok', channel: 'food', ask: 'save tartine', costUsd: 0.002 }];
+    const usage = usageSummary(all, LA, 7);
+    check('/usage: total, per day and priciest', usage.includes('last 7 days') && usage.includes('2026-11-15') && usage.includes('task "Kyoto hotels"'), usage);
+    const digest = reviewDigest(
+      [{ id: 'j1', channelId: 'c', channelName: 'travel', from: '2026-11-15T08:00:00Z', to: '2026-11-15T08:40:00Z', summary: 'Flight check: asked for the UA123 time twice.' }],
+      back,
+      LA,
+      new Date('2026-11-15T06:00:00Z'),
+    );
+    const problemsAt = digest.indexOf('Problems: 2');
+    check('digest: journal first, then problems, then asks', digest.indexOf('Journal: 1') < problemsAt && problemsAt < digest.indexOf('Asks, in order'), digest);
+    check('digest: names the failed tool and the message', digest.includes('failed tools: fetch_page: HTTP 403') && digest.includes('message 123'), digest);
+    check('digest: voice notes are marked', digest.includes('🎤'), digest);
+
+    process.env.VOICE_FILE = join(adir, 'voice.json');
+    check('voice: an untranscribed note says so', voiceLine({ id: 'v0', contentType: 'audio/ogg', name: 'voice-message.ogg', duration: 12 }) === '[voice note 0:12]');
+    rememberTranscript('v1', 'remind me to call mom at six');
+    const said = messageText({ content: '', attachments: new Map([['v1', { id: 'v1', contentType: 'audio/ogg', name: 'voice-message.ogg', duration: 4.2 }]]) as never, embeds: [], createdAt: new Date() }, LA);
+    check('voice: a transcribed note becomes the message text', said === '[voice note 0:04: "remind me to call mom at six"]', said);
+
+    const state = new BriefState(join(adir, 'brief.json'));
+    const nineAm = new Date('2026-11-15T17:00:00Z');
+    check('brief: due after the hour, once a day', !state.due(new Date('2026-11-15T15:00:00Z'), LA, 8) && state.due(nineAm, LA, 8));
+    state.sent(nineAm, LA);
+    check('brief: not sent twice, even after a restart', !new BriefState(join(adir, 'brief.json')).due(new Date('2026-11-15T18:00:00Z'), LA, 8));
+    const chState = new BriefState(join(adir, 'ch.json'));
+    const chans = [{ id: '1', name: 'travel' }, { id: '2', name: 'misc' }];
+    check('brief: goes to #misc, kept by ID', briefChannel(chState, undefined, chans) === '2' && briefChannel(new BriefState(join(adir, 'ch.json')), undefined, [{ id: '1', name: 'travel' }, { id: '2', name: 'squire' }]) === '2');
+    check('brief: a configured channel wins', briefChannel(chState, '9', chans) === '9');
+    check('brief: not sent in the afternoon', !new BriefState(join(adir, 'none.json')).due(new Date('2026-11-15T23:30:00Z'), LA, 8));
+    const rs = new ReminderStore(join(adir, 'r.json'), LA);
+    rs.add({ text: 'Pick up dry cleaning', due: new Date('2026-11-15T20:00:00Z'), repeat: 'none', channelId: 'c' }, nineAm);
+    rs.add({ text: 'Not today', due: new Date('2026-11-17T20:00:00Z'), repeat: 'none', channelId: 'c' }, nineAm);
+    const bj = new Journal(join(adir, 'j.json'));
+    bj.done('c', '1', { channelId: 'c', channelName: 'travel', from: '2026-11-14T08:00:00Z', to: '2026-11-14T09:00:00Z', summary: 'Japan trip: still need to book the Osaka hotel.', ongoing: { until: '2027-06-12', topic: 'Japan trip' } });
+    const facts = await briefFacts({ timeZone: LA, reminders: rs, journal: bj, tasks: { active: () => [] } as never }, nineAm);
+    check('brief: facts carry today, reminders and open plans', facts.includes('Sunday, November 15') && facts.includes('Pick up dry cleaning') && !facts.includes('Not today') && facts.includes('Osaka hotel') && !facts.includes('work-city forecast'), facts);
+    const monday = await briefFacts({ timeZone: LA, reminders: rs, journal: bj, tasks: { active: () => [] } as never }, new Date('2026-11-16T17:00:00Z'));
+    const handoff = dropMissingNotes('* Hand off to @alex at the card shop (time not set yet): purple Riven AA\n* the card shop handoff to @alex today, no time set: red Pyke AA\n* Dinner — time TBD.\n* No time set? Fine.');
+    check('brief: notes about missing details are taken out', handoff === '* Hand off to @alex at the card shop: purple Riven AA\n* the card shop handoff to @alex today: red Pyke AA\n* Dinner.\n* No time set? Fine.', handoff);
+    const mailbox = (name: string) =>
+      ({ name, api: async (url: string) => (url.endsWith('/messages') ? { messages: [{ id: 'm' }] } : url.includes('/messages/') ? { id: 'm', snippet: `${name} bill due`, payload: { mimeType: 'text/plain', headers: [], body: { data: Buffer.from(`${name}: payment due on Nov 20`).toString('base64url') } } } : { items: [] }) }) as never;
+    const workBox = mailbox('work');
+    const mainBox = { ...(mailbox('main') as object), extraMail: [workBox], mailboxes: () => [mainBox, workBox] } as never;
+    const twoInboxes = await briefFacts({ timeZone: LA, reminders: rs, journal: bj, tasks: { active: () => [] } as never, google: mainBox }, nineAm);
+    check('brief: every Gmail account gets its own inbox facts, with the email text', twoInboxes.includes('Inbox (main account)') && twoInboxes.includes('Inbox (work account)') && twoInboxes.includes('work: payment due on Nov 20'), twoInboxes);
+    check('brief: on a weekday it asks for the work-city forecast', monday.includes('work-city forecast'), monday);
+
+    // A reply's trace: calls, tools and usage add up across rounds.
+    const replies = [
+      { stop: 'tool_use' as const, text: '', calls: [{ id: 'a', name: 'recall', input: { query: 'x' } }], sources: new Sources(), turn: { role: 'assistant' as const, text: '', calls: [{ id: 'a', name: 'recall', input: { query: 'x' } }] }, usage: { ...noUsage('claude-haiku-5-5'), input: 100 } },
+      { stop: 'done' as const, text: 'done', calls: [], sources: new Sources(), turn: { role: 'assistant' as const, text: 'done' }, usage: { ...noUsage('claude-haiku-5-5'), input: 50, webSearches: 1 } },
+    ];
+    const agent = new Agent({ llm: { retryable: () => false, generate: async () => replies.shift()! }, model: 'claude-haiku-5-5', effort: 'low', timeZone: LA, reminders: rs, journal: bj });
+    const replyTrace = newTrace();
+    await agent.reply([{ role: 'user', content: [{ type: 'text', text: 'hm' }] }], { channelId: 'c', channelName: 'misc', trace: replyTrace });
+    check('agent: the trace counts calls, tools and usage', replyTrace.calls === 2 && replyTrace.tools.join() === 'recall' && replyTrace.usage?.input === 150 && replyTrace.usage.webSearches === 1, JSON.stringify(replyTrace));
+    // "Got it, from now on…" with nothing saved goes back once to save it.
+    const reply = (t: string) => ({ stop: 'done' as const, text: t, calls: [], sources: new Sources(), turn: { role: 'assistant' as const, text: t } });
+    const saveCall = { id: 's', name: 'remember', input: { text: 'Prefers aisle seats' } };
+    const promiseMem = new MemoryStore(join(adir, 'promise-mem.json'));
+    const scripted = [reply('Got it. From now on I will book aisle seats.'), { stop: 'tool_use' as const, text: '', calls: [saveCall], sources: new Sources(), turn: { role: 'assistant' as const, text: '', calls: [saveCall] } }, reply('Got it, aisle seats from now on.')];
+    const seen: string[] = [];
+    const promiser = new Agent({
+      llm: { retryable: () => false, generate: async (_m: unknown, req: { turns: { role: string; content?: { text?: string }[] }[] }) => (seen.push(JSON.stringify(req.turns.at(-1))), scripted.shift()!) },
+      model: 'claude-haiku-5-5', effort: 'low', timeZone: LA, reminders: rs, memory: promiseMem,
+    } as never);
+    const promised = await promiser.reply([{ role: 'user', content: [{ type: 'text', text: 'always book me aisle seats' }] }], { channelId: 'c', channelName: 'travel' });
+    check('agent: an unsaved "from now on" is sent back to be saved', promiseMem.list().some((m) => m.text === 'Prefers aisle seats') && promised.startsWith('Got it, aisle') && seen.some((t) => t.includes('saved nothing to memory')), `${promised} | ${seen.join(' / ')}`);
+    const plain = [reply('Sure, here are three cafes.')];
+    const quiet = new Agent({ llm: { retryable: () => false, generate: async () => plain.shift()! }, model: 'claude-haiku-5-5', effort: 'low', timeZone: LA, reminders: rs, memory: promiseMem } as never);
+    check('agent: an ordinary reply is not sent back', (await quiet.reply([{ role: 'user', content: [{ type: 'text', text: 'cafes?' }] }], { channelId: 'c', channelName: 'misc' })).startsWith('Sure'));
+  } finally {
+    rmSync(adir, { recursive: true, force: true });
+  }
 }
 
 if (failures) {

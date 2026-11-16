@@ -3,18 +3,26 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 
 /**
  * The owner's Obsidian vault: plain markdown files on disk that Obsidian
- * syncs. Squire writes only under its own folder (`Squire/` by default) and
- * reads anywhere in the vault. Paths handed in and out are vault-relative
- * with forward slashes, the way Obsidian shows them.
+ * syncs. Squire reads and organises the whole vault. Paths handed in and out
+ * are vault-relative with forward slashes, the way Obsidian shows them.
  */
+/** The bot's own folder: what only it writes, kept apart from the owner's notes. */
+export const BOT_FOLDER = 'Squire';
+/** Where notes saved without a folder land, for the bot to sort later. */
+export const INBOX_FOLDER = `${BOT_FOLDER}/Inbox`;
+/** Finished background tasks' reports. */
+export const TASKS_FOLDER = `${BOT_FOLDER}/Tasks`;
+/** The training plan: Training.md and the splits, kept with the owner's notes. */
+export const TRAINING_FOLDER = 'Training';
+/** The training log's day-by-day workout notes. */
+export const WORKOUTS_FOLDER = `${BOT_FOLDER}/Workouts`;
+/** The owner's recipes, at the vault root with their other notes (sorted into subfolders such as Recipes/Meal). */
+export const RECIPES_FOLDER = 'Recipes';
+
 export class Vault {
   readonly root: string;
 
-  constructor(
-    root: string,
-    /** Squire's own folder inside the vault. */
-    readonly folder = 'Squire',
-  ) {
+  constructor(root: string) {
     this.root = resolve(root);
   }
 
@@ -25,23 +33,18 @@ export class Vault {
     return path;
   }
 
-  /** Vault-relative path under Squire's folder, e.g. own('Tasks', 'x.md') → "Squire/Tasks/x.md". */
-  own(...parts: string[]): string {
-    return [this.folder, ...parts].join('/');
-  }
-
   /**
-   * A vault-relative path inside Squire's folder, from what the owner or the
-   * model said: "Travel/Japan", "Squire/Travel/Japan" and "/Travel/Japan/"
-   * all mean Squire/Travel/Japan. Each segment is made a safe file name, and
-   * anything that would land outside Squire's folder is refused.
+   * A vault-relative path from what the owner or the model said:
+   * "Travel/Japan" and "/Travel/Japan/" both mean Travel/Japan, and "" is the
+   * vault root. Each segment is made a safe file name, which also keeps
+   * Obsidian's dot-folders (.obsidian, .trash) out of reach, and ".." is refused.
    */
-  ownPath(input: string): string {
+  notePath(input: string): string {
     const parts = input.replace(/\\/g, '/').split('/').map((p) => p.trim()).filter((p) => p && p !== '.');
     if (parts.some((p) => p === '..')) throw new Error(`"${input}" can't use "..".`);
-    if (parts[0]?.toLowerCase() === this.folder.toLowerCase()) parts.shift();
-    const clean = parts.map((p, i) => (i === parts.length - 1 && p.toLowerCase().endsWith('.md') ? `${noteFileName(p.slice(0, -3))}.md` : noteFileName(p)));
-    const rel = this.own(...clean);
+    const rel = parts
+      .map((p, i) => (i === parts.length - 1 && p.toLowerCase().endsWith('.md') ? `${noteFileName(p.slice(0, -3))}.md` : noteFileName(p)))
+      .join('/');
     this.abs(rel);
     return rel;
   }

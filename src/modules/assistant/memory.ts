@@ -95,6 +95,7 @@ Memory:
 - Save with remember when you learn something durable that would make future help better: preferences, routines, goals, recurring plans, people and relationships, places they go, things they've said they like or hate. One fact per memory, written plainly in the third person ("Prefers aisle seats", "Sister Amy lives in Portland").
 - Don't save one-off details, things already in the chat that won't matter next week, anything already remembered, or secrets (passwords, card numbers, codes).
 - When something changes, update_memory the old one rather than adding a contradiction; forget_memory what's no longer true or when they ask you to forget.
+- A standing instruction about how you work ("no need to remind me about…", "don't…", "from now on…") is a preference to save. Save it (or update_memory the memory it changes, so no older memory says the opposite) in the same reply, before saying "got it". Never confirm a preference you didn't save.
 - If they tell you to remember something, do it and say so in a couple of words. Otherwise save quietly; no need to announce it.`;
 
 export function memoryTools(store: MemoryStore): ToolHandler[] {

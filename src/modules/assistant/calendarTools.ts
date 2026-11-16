@@ -106,7 +106,7 @@ export function calendarTools(account: GoogleAccount, timeZone: string, readOnly
           properties: {
             from: { type: 'string', description: 'ISO date-time with offset; empty string for now.' },
             to: { type: 'string', description: 'ISO date-time with offset; empty string for 7 days after from.' },
-            query: { type: 'string', description: 'Free-text match on event fields, or empty string.' },
+            query: { type: 'string', description: 'Free-text match; | between alternatives ("Tokyo|Osaka"); empty string for all.' },
           },
           required: ['from', 'to', 'query'],
           additionalProperties: false,
@@ -116,7 +116,10 @@ export function calendarTools(account: GoogleAccount, timeZone: string, readOnly
         const from = args.from ? instant(String(args.from), 'from') : new Date();
         const to = args.to ? instant(String(args.to), 'to') : addLocalDays(from, 7, timeZone);
         const query = String(args.query ?? '').trim();
-        const all = await listEvents(account, from, to, query);
+        const alternatives = [...new Set(query.split('|').map((q) => q.trim()).filter(Boolean))];
+        const found = alternatives.length > 1 ? (await Promise.all(alternatives.map((q) => listEvents(account, from, to, q)))).flat() : await listEvents(account, from, to, query);
+        const seen = new Set<string>();
+        const all = found.filter(({ e, cal }) => !seen.has(`${cal.id}/${e.id}`) && !!seen.add(`${cal.id}/${e.id}`)).sort((a, b) => startMs(a.e) - startMs(b.e));
         if (!all.length) return 'No events in that range.';
         const lines = all.slice(0, EVENT_CAP).map(({ e, cal }) =>
           [`${cal.id} / ${e.id}`, when(e, timeZone), e.summary || '(no title)', e.location, cal.summaryOverride || cal.summary]

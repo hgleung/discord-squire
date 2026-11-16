@@ -81,7 +81,7 @@ function renderTraining(plan: PlanData): string {
     frontmatter([['plan', planName], ['unit', unit], ['started', createdDate]]),
     `# ${oneLine(planName)}`,
     '',
-    '*Squire keeps this folder: workouts are in Workouts/, splits in Splits/.*',
+    '*Squire keeps this log: splits are in Splits/, and each workout is a note of its own.*',
     '',
     '## Quick add',
     ...plan.quickAddExercises.flatMap((q) => ['', renderExercise(q, '###')]),

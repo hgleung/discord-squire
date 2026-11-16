@@ -3,18 +3,20 @@ import { startBot } from './bot.js';
 import { trainingModule } from './modules/training/index.js';
 import { musicModule } from './modules/music/index.js';
 import { assistantModule } from './modules/assistant/index.js';
+import { systemModule } from './modules/system/index.js';
 import { createApp } from './modules/training/http.js';
-import { Vault } from './vault.js';
+import { TRAINING_FOLDER, Vault, WORKOUTS_FOLDER } from './vault.js';
 
 // Last line of defence: a bug in one module must not take the process down.
 process.on('unhandledRejection', (reason) => console.error('Unhandled rejection:', reason));
 process.on('uncaughtException', (err) => console.error('Uncaught exception:', err));
 
 const config = loadConfig();
-const vault = new Vault(config.vault.root, config.vault.folder);
+const vault = new Vault(config.vault.root);
 
 const training = trainingModule({
-  trainingDir: vault.abs(vault.own('Training')),
+  trainingDir: vault.abs(TRAINING_FOLDER),
+  workoutsDir: vault.abs(WORKOUTS_FOLDER),
   ollamaHost: config.ollama.host,
   ollamaModel: config.ollama.model,
 });
@@ -25,6 +27,7 @@ startBot({
   modules: [
     training,
     musicModule(config.music, config.discord.ownerId),
+    systemModule(),
     ...(config.assistant
       ? [assistantModule({ ...config.assistant, ownerId: config.discord.ownerId, training: training.service, vault })]
       : []),

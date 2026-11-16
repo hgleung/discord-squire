@@ -3,6 +3,10 @@
  * catches the redirect on a loopback port and saves the refresh token to
  * GOOGLE_TOKEN_FILE (default data/google-token.json).
  *
+ * An extra Gmail account: `npm run google:auth -- work`, signed in as that
+ * account. It asks for Gmail only, saves to data/google-token-work.json, and
+ * needs `work` listed in GOOGLE_EXTRA_ACCOUNTS.
+ *
  * Setup, once, at console.cloud.google.com:
  * 1. Create a project and enable the Gmail API and the Google Calendar API.
  * 2. OAuth consent screen: External. Add yourself as a test user, or publish
@@ -19,11 +23,18 @@ import type { AddressInfo } from 'node:net';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CodeChallengeMethod, OAuth2Client } from 'google-auth-library';
-import { GOOGLE_SCOPES } from './google.js';
+import { GMAIL_SCOPES, GOOGLE_SCOPES, MAILBOX_NAME, extraTokenFile } from './google.js';
 
 const clientId = process.env.GOOGLE_CLIENT_ID;
 const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-const tokenFile = process.env.GOOGLE_TOKEN_FILE || fileURLToPath(new URL('../../../data/google-token.json', import.meta.url));
+const extra = process.argv[2]?.trim().toLowerCase();
+if (extra && !MAILBOX_NAME.test(extra)) {
+  console.error(`"${extra}" isn't a usable account name: letters, digits and dashes, not main or all (like work).`);
+  process.exit(1);
+}
+const scopes = extra ? GMAIL_SCOPES : GOOGLE_SCOPES;
+const tokenFile = extra ? extraTokenFile(extra) : process.env.GOOGLE_TOKEN_FILE || fileURLToPath(new URL('../../../data/google-token.json', import.meta.url));
+if (extra) console.log(`Signing in the "${extra}" Gmail account (mail only). Pick that account on Google's page.`);
 if (!clientId || !clientSecret) {
   console.error('Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env first (see the comment at the top of this file).');
   process.exit(1);
@@ -38,8 +49,8 @@ const client = new OAuth2Client({ clientId, clientSecret, redirectUri });
 const { codeVerifier, codeChallenge } = await client.generateCodeVerifierAsync();
 const url = client.generateAuthUrl({
   access_type: 'offline',
-  prompt: 'consent',
-  scope: GOOGLE_SCOPES,
+  prompt: extra ? 'consent select_account' : 'consent',
+  scope: scopes,
   state,
   code_challenge: codeChallenge,
   code_challenge_method: CodeChallengeMethod.S256,
@@ -74,7 +85,7 @@ const code = await new Promise<string>((resolve, reject) => {
 
 const { tokens } = await client.getToken({ code, codeVerifier });
 const granted = new Set((tokens.scope ?? '').split(/\s+/));
-const missing = GOOGLE_SCOPES.filter((s) => !granted.has(s));
+const missing = scopes.filter((s) => !granted.has(s));
 if (missing.length) {
   console.error(
     `Some permissions weren't granted:\n${missing.map((s) => `  ${s}`).join('\n')}\n` +
@@ -92,3 +103,6 @@ if (!tokens.refresh_token) {
 mkdirSync(dirname(tokenFile), { recursive: true });
 writeFileSync(tokenFile, JSON.stringify({ refresh_token: tokens.refresh_token, scope: tokens.scope }, null, 2), { mode: 0o600 });
 console.log(`Signed in. Token saved to ${tokenFile}.`);
+if (extra && !(process.env.GOOGLE_EXTRA_ACCOUNTS ?? '').toLowerCase().split(/[\s,]+/).includes(extra)) {
+  console.log(`Add it to .env so Squire reads it: GOOGLE_EXTRA_ACCOUNTS=${extra}`);
+}

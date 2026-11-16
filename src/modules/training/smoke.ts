@@ -156,6 +156,32 @@ const live = await new Promise<boolean>((done) => {
 });
 check('15. live outside edit ....', live);
 
+// 16. Workouts can live in a folder of their own, away from the splits, and edits there are still noticed.
+{
+  const root = mkdtempSync(join(tmpdir(), 'squire-split-'));
+  const plans = join(root, 'Training');
+  const workouts = join(root, 'Squire', 'Workouts');
+  const apart = new PlanStore(plans, workouts);
+  apart.init(createNewPlan('Apart', 'lb', today));
+  const push = apart.load().templates.find((t) => t.name === 'Push day')!.id;
+  apart.update((p) => applyTemplateToDay(p, today, push));
+  const note = join(workouts, `${today} Workout.md`);
+  check('16. workouts folder apart ', existsSync(note) && existsSync(join(plans, 'Splits', 'Push day.md')) && !existsSync(join(plans, 'Workouts')));
+  check('16. reloads from both ....', getOrEmptyDay(new PlanStore(plans, workouts).load(), today).exercises.length === 6);
+  const seen = await new Promise<boolean>((done) => {
+    const timer = setTimeout(() => done(false), 3000);
+    apart.once('change', () => {
+      clearTimeout(timer);
+      done(true);
+    });
+    writeFileSync(note, readFileSync(note, 'utf8') + '\n');
+  });
+  check('16. watches workouts .....', seen);
+  apart.update((p) => ({ ...p, days: {} }));
+  check('16. dropped day deleted ..', !existsSync(note));
+  apart.close();
+}
+
 console.log(`\nTemp training folder: ${dir}`);
 console.log(failures === 0 ? 'all checks passed' : `${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

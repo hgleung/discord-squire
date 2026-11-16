@@ -2,12 +2,13 @@
  * The Discord side of opening links: downloading what the owner attaches or
  * pastes, and reading the messages they link to.
  */
-import { PermissionFlagsBits, type Attachment, type Client, type Collection, type Message } from 'discord.js';
+import { MessageReferenceType, PermissionFlagsBits, type Attachment, type Client, type Collection, type Message } from 'discord.js';
 import type { ChatLine } from './history.js';
 import type { ImagePart } from './llm.js';
 import { expandShortLink, fetchImage, findUrls, IMAGE_TYPES, isDiscordCdn, isShortLink, MAX_IMAGE_BYTES, parseDiscordLink, resizedDiscordUrl } from './links.js';
 import type { DiscordReader } from './linkTools.js';
 import { toLocalShort } from './time.js';
+import { isAudio, transcribeAttachment, voiceLine } from './voice.js';
 
 /** Images per message shown to the model; the rest are only named. */
 const MAX_IMAGES = 8;
@@ -48,16 +49,63 @@ async function imagesOf(attachments: Collection<string, Attachment> | Attachment
   return images;
 }
 
+/** The parts of a message (or a forwarded copy of one) this file reads. */
+type MessageLike = Pick<Message, 'content' | 'attachments' | 'embeds'> & { createdAt: Date | null; messageSnapshots?: Message['messageSnapshots'] };
+
+/** What a forward's link previews and rich cards say, for forwards of a shared link. */
+function embedText(m: Pick<Message, 'embeds'>): string {
+  return m.embeds
+    .map((e) => [e.title, e.description, e.url].filter(Boolean).join(' · '))
+    .filter(Boolean)
+    .map((e) => ` [preview: ${e}]`)
+    .join('');
+}
+
+/**
+ * A message's text with anything forwarded in it written out. A forward has
+ * no text of its own: the forwarded message travels in messageSnapshots, so
+ * without this the assistant sees an empty message.
+ */
+export function messageText(m: MessageLike, timeZone: string): string {
+  const voice = [...m.attachments.values()].filter(isAudio).map(voiceLine);
+  const forwards = [...(m.messageSnapshots?.values() ?? [])].map((f) => {
+    const when = f.createdAt ? ` from ${toLocalShort(f.createdAt, timeZone)}` : '';
+    const files = [...f.attachments.values()].map((a) => (isAudio(a) ? ` ${voiceLine(a)}` : ` [attached: ${a.name}]`)).join('');
+    return `
+[forwarded message${when}: ${f.content ?? ''}${files}${embedText(f as MessageLike)}]`;
+  });
+  return [m.content, ...voice].filter(Boolean).join(' ').concat(forwards.join('')).trim();
+}
+
+/** A message's own attachments and those of anything forwarded in it. */
+export function messageAttachments(m: MessageLike): Attachment[] {
+  return [...m.attachments.values(), ...[...(m.messageSnapshots?.values() ?? [])].flatMap((f) => [...f.attachments.values()])];
+}
+
+/** Whether the message is a forward rather than a reply. */
+export const isForward = (m: Pick<Message, 'reference'>) => m.reference?.type === MessageReferenceType.Forward;
+
 /**
  * Opens what one of the owner's messages carries before the model sees it:
  * downloads its images and any Discord image links in its text, spells out
  * short links, and opens a linked Discord message. Anything that fails is
  * noted on the line with the reason, so the model can say what went wrong.
  */
-export async function openLinks(message: Message, line: ChatLine, reader: DiscordReader): Promise<ChatLine> {
+export async function openLinks(message: Message, line: ChatLine, reader: DiscordReader, timeZone: string): Promise<ChatLine> {
   const notes: string[] = [];
-  const images = await imagesOf(message.attachments, MAX_IMAGES, notes);
-  for (const url of findUrls(message.content)) {
+  // Voice notes first: once transcribed, the transcript is the message's text.
+  let voice = false;
+  for (const a of messageAttachments(message).filter(isAudio)) {
+    voice = true;
+    try {
+      await transcribeAttachment(a);
+    } catch (err) {
+      notes.push(`couldn't transcribe the voice note ${a.name}: ${reason(err)}`);
+    }
+  }
+  if (voice) line = { ...line, content: messageText(message, timeZone) };
+  const images = await imagesOf(messageAttachments(message), MAX_IMAGES, notes);
+  for (const url of findUrls(messageText(message, timeZone))) {
     try {
       if (isShortLink(url)) {
         const target = await expandShortLink(url);
@@ -121,14 +169,16 @@ export function discordReader(client: Client, ownerId: string | undefined, timeZ
       let size = 0;
       for (const m of messages) {
         const notes: string[] = [];
-        const shown = await imagesOf(m.attachments, MAX_IMAGES - images.length, notes);
-        for (const url of findUrls(m.content).filter(isShortLink)) {
+        const attachments = messageAttachments(m);
+        const content = messageText(m, timeZone);
+        const shown = await imagesOf(attachments, MAX_IMAGES - images.length, notes);
+        for (const url of findUrls(content).filter(isShortLink)) {
           const target = await expandShortLink(url).catch(() => url);
           if (target !== url) notes.push(`${url} leads to ${target}`);
         }
         images.push(...shown);
-        const files = [...m.attachments.values()].map((a) => ` [attached: ${a.name}${shown.some((s) => s.url === a.url) ? ', shown' : ''}]`).join('');
-        const text = `[${toLocalShort(m.createdAt, timeZone)} · ${m.author.bot ? 'bot' : m.author.username}] ${m.content}${files}${notes.map((n) => ` [${n}]`).join('')}`;
+        const files = attachments.map((a) => ` [attached: ${a.name}${shown.some((s) => s.url === a.url) ? ', shown' : ''}]`).join('');
+        const text = `[${toLocalShort(m.createdAt, timeZone)} · ${m.author.bot ? 'bot' : m.author.username}] ${content}${files}${notes.map((n) => ` [${n}]`).join('')}`;
         if (size + text.length > MAX_READ_CHARS) {
           lines.push(`[…stopped here to keep this short. Read on from ${m.url}]`);
           break;

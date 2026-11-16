@@ -46,8 +46,8 @@ Saved places:
     (opts.readOnly
       ? ''
       : `
-- When they share a place (a reel, a link, a name) without saying what to do, save it with places_add right away, to the existing list that fits. Don't start a new list unless they ask for one, by name or by where it goes.
-- Set near to the city or area the post names; left empty it searches near home. If the post gives an address, or the match isn't the place the post means, search by that address instead of the name.
+- When they share a place (a reel, a link, a name) without saying what to do, save it with places_add right away, to the existing list that fits (a restaurant goes in food). Don't start a new list unless they ask for one, by name or by where it goes ("save these for the Japan trip" means a Japan trip list).
+- Set near to the city or area the post names ("Shimokitazawa, Tokyo", "San Francisco"); left empty it searches near home. If the post gives an address, or the match isn't the place the post means, search by that address instead of the name. Put the context in the note: the trip it's for, if your journal or notes show one there, and what the reel or post recommended.
 - places_add saves to Squire's copy only: Google has no way to write to Maps lists. Give the place's Maps link so they can tap Save on their phone, and mention the Squire-only part once in a conversation, not with every place.`);
 }
 
@@ -90,7 +90,7 @@ export function placesTools(
           properties: {
             list: { type: 'string', description: 'List name or its start ("food", "bars"); empty string for all lists.' },
             text: { type: 'string', description: 'Words to match ("ramen", "rooftop", "matcha"); empty string for anything.' },
-            near: { type: 'string', description: '"home", a place or area ("Union Square", "the Chicago Loop"), or empty string for anywhere.' },
+            near: { type: 'string', description: '"home", a place or area ("Union Square SF", "the Chicago Loop"), or empty string for anywhere.' },
             within_km: { type: 'number', description: 'Only places this close to "near"; 0 for no limit.' },
             open_now: { type: 'boolean', description: 'Only places open right now (places with unknown hours are left out and counted).' },
             limit: { type: 'integer', description: 'How many to return, 1-25.' },
@@ -158,12 +158,13 @@ export function placesTools(
         input_schema: {
           type: 'object',
           properties: {
-            list: { type: 'string', description: 'Which list, e.g. "Dessert". A new name starts a new Squire-only list.' },
-            query: { type: 'string', description: 'The place to look up, with enough to find it: "Corner Bakery Springfield".' },
+            list: { type: 'string', description: 'An existing list that fits, e.g. "food".' },
+            query: { type: 'string', description: 'The place to look up, with enough to find it: "Tartine Bakery San Francisco".' },
             near: { type: 'string', description: 'Area to search around ("home" or a place), or empty string for near home.' },
             note: { type: 'string', description: 'Why they saved it ("get the morning bun"), or empty string.' },
+            new_list: { type: 'boolean', description: 'True only when the owner asked for a new list by that name.' },
           },
-          required: ['list', 'query', 'near', 'note'],
+          required: ['list', 'query', 'near', 'note', 'new_list'],
           additionalProperties: false,
         },
       },
@@ -172,6 +173,10 @@ export function placesTools(
         const near = nearText && nearText.toLowerCase() !== 'home' ? await places.locate(nearText) : undefined;
         const list = String(args.list ?? '').trim();
         if (!list) throw new Error('Say which list to add it to.');
+        const known = [...new Set([...places.lists().map((l) => l.name), ...places.places().map((p) => p.list)])];
+        if (args.new_list !== true && !known.some((l) => l.toLowerCase() === list.toLowerCase())) {
+          throw new Error(`There's no "${list}" list. Lists: ${known.join(', ')}. Use the one that fits; a new list only if the owner asked for one.`);
+        }
         const p = await places.add(list, String(args.query ?? ''), near, String(args.note ?? ''));
         return `Added to ${p.list} (Squire only): ${describe(p, clock())}`;
       },

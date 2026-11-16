@@ -19,12 +19,17 @@ import type { ReminderStore } from './reminders.js';
 import { reminderTools } from './reminderTools.js';
 import { memoryTools, type MemoryStore } from './memory.js';
 import { toLocalIso, toLocalShort } from './time.js';
-import { GOOGLE_TASK_PROMPT, googleTools, type GoogleAccount } from './google.js';
-import { saveTaskReport } from './notes.js';
+import { GOOGLE_TASK_PROMPT, googleTools, mailboxPrompt, type GoogleAccount } from './google.js';
+import { NOTES_TASK_PROMPT, notesTools, saveTaskReport, TASK_NOTE_TOOLS } from './notes.js';
 import type { Vault } from '../../vault.js';
 import { placesPrompt, placesTools } from './placesTools.js';
 import { linkTools } from './linkTools.js';
 import type { SavedPlaces } from './places.js';
+import type { Journal } from './journal.js';
+import { traceTools, type ActivityLog } from './activity.js';
+import { addUsage } from './usage.js';
+import type { Usage } from './llm.js';
+import type { ReadLog } from './readLog.js';
 
 /**
  * Background tasks ("subagents"). The chat assistant hands one off when a job
@@ -71,7 +76,14 @@ export interface Task {
   lastUpdate?: string;
   result?: string;
   finishedAt?: string;
+  /** Tokens used over the task's life, for the activity log. */
+  usage?: Usage;
+  /** Tools it called, failures with their error; capped. */
+  toolLog?: string[];
 }
+
+/** Most tool entries a task keeps for the activity log. */
+const MAX_TOOL_LOG = 80;
 
 export interface TaskLimits {
   /** Tasks running at the same moment; more wait their turn. */
@@ -159,8 +171,14 @@ export interface TaskRunnerOptions {
   google?: GoogleAccount;
   /** Finished reports are also saved as notes here. */
   vault?: Vault;
+  /** Pages and videos actually opened; recipe notes may only cite these. */
+  reads?: ReadLog;
   /** The owner's saved Google Maps lists, read-only. */
   places?: SavedPlaces;
+  /** Earlier conversations, for the background on a task. */
+  journal?: Journal;
+  /** Where finished tasks are logged, with what they cost. */
+  activity?: ActivityLog;
   limits?: Partial<TaskLimits>;
 }
 
@@ -176,7 +194,7 @@ How to work:
 - post_update only for things the owner would want to know before the end: a real change, a decision they need to make, or a long task's halfway findings. Not for "starting now" or "still looking".
 - You may set reminders for the owner if the task calls for it.
 - If you can't complete it — the information doesn't exist, or the deadline arrives — call finish_task with outcome "gave_up" and say what you found and what's missing.
-- Your finish_task report is what the owner reads. Lead with the answer. Keep it tight: it's a Discord message, so bullets and **bold** work, tables and # headings don't. Include links for anything they'd act on.
+- Your finish_task report is what the owner reads: it is posted in the channel the task came from, with a ping, so that is your reply there. Don't tell them you can't post. Lead with the answer. Keep it tight: it's a Discord message, so bullets and **bold** work, tables and # headings don't. Include links for anything they'd act on.
 - Every turn must end in a tool call: keep working, wait_until, or finish_task.`;
 
 export class TaskRunner {
@@ -198,8 +216,9 @@ export class TaskRunner {
     this.system =
       SYSTEM +
       (opts.memory ? '\n- If you learn something durable about the owner that would help later (a preference, a plan, a constraint), save it with remember.' : '') +
-      (opts.google ? GOOGLE_TASK_PROMPT : '') +
+      (opts.google ? GOOGLE_TASK_PROMPT + mailboxPrompt(opts.google) : '') +
       (opts.places ? placesPrompt(opts.places, { readOnly: true }) : '') +
+      (opts.vault ? NOTES_TASK_PROMPT : '') +
       '\n- If web_fetch fails on a page or comes back blocked, try fetch_page on the same link before giving up on it.' +
       profilePrompt(opts.profile);
     // A task that was mid-run when the bot stopped picks up where it left off.
@@ -363,6 +382,9 @@ export class TaskRunner {
       // Read-only: a worker acts unattended on whatever the emails say.
       ...(this.opts.google ? googleTools(this.opts.google, tz, { readOnly: true }) : []),
       ...(this.opts.places ? placesTools(this.opts.places, tz, { readOnly: true }) : []),
+      // Tasks are often "research this and write it up as a note"; moving and
+      // deleting stay with the chat assistant, where the owner sees them.
+      ...(this.opts.vault ? notesTools(this.opts.vault, tz, this.opts.reads).filter((h) => TASK_NOTE_TOOLS.includes(h.def.name)) : []),
       // fetch_page only: tasks run with no Discord message to read links from.
       ...linkTools(),
     ];
@@ -430,13 +452,15 @@ export class TaskRunner {
       let gen: Generation;
       try {
         gen = await this.opts.llm.generate(this.modelFor(task), {
-          system: this.system + (this.opts.memory?.prompt() ?? ''),
+          system: this.system + (this.opts.memory?.prompt() ?? '') + (this.opts.journal?.prompt(this.opts.timeZone) ?? ''),
           tools,
           turns: task.messages,
           web: { maxUses: 10, location: this.opts.profile?.location },
         });
         task.apiCalls += 1;
         task.errors = 0;
+        this.opts.reads?.recordFetches(gen);
+        if (gen.usage) task.usage = task.usage ? addUsage(task.usage, gen.usage) : gen.usage;
       } catch (err) {
         return this.onError(task, err);
       }
@@ -462,6 +486,10 @@ export class TaskRunner {
       }
 
       const results = await runTools(calls, handlers, new Set(['wait_until', 'finish_task']));
+      this.opts.reads?.recordTools(calls, results);
+      const trace = { outcome: 'ok', calls: 0, tools: task.toolLog ?? [] };
+      traceTools(trace, results);
+      task.toolLog = trace.tools.slice(-MAX_TOOL_LOG);
 
       const finish = calls.find((c) => c.name === 'finish_task');
       if (finish) {
@@ -525,6 +553,19 @@ export class TaskRunner {
     task.result = report;
     task.finishedAt = new Date().toISOString();
     delete task.wakeAt;
+    this.opts.activity?.record({
+      kind: 'task',
+      outcome: status === 'done' ? 'ok' : status,
+      channel: task.channelName,
+      title: task.title,
+      taskId: task.id,
+      ...(status === 'failed' ? { error: report.slice(0, 300) } : {}),
+      ms: new Date(task.finishedAt).getTime() - new Date(task.createdAt).getTime(),
+      calls: task.apiCalls,
+      tools: task.toolLog,
+      usage: task.usage,
+    });
+    delete task.toolLog;
     this.store.save();
     // Real results become notes; a cancel or a crash has nothing worth keeping.
     const note = this.opts.vault && (status === 'done' || status === 'gave_up') ? saveTaskReport(this.opts.vault, task, this.opts.timeZone) : undefined;

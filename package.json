@@ -16,7 +16,8 @@
     "check:assistant": "tsx src/modules/assistant/check.ts && tsx src/modules/assistant/google.check.ts",
     "check:assistant:live": "tsx src/modules/assistant/live.ts",
     "google:auth": "tsx src/modules/assistant/googleAuth.ts",
-    "training:import": "tsx src/modules/training/import.ts"
+    "training:import": "tsx src/modules/training/import.ts",
+    "review:digest": "tsx src/modules/assistant/reviewDigest.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",

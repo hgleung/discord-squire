@@ -134,7 +134,50 @@ function formatMessage(m: Message, timeZone: string, cap: number): string {
   ].join('\n');
 }
 
-export function gmailTools(account: GoogleAccount, timeZone: string, readOnly: boolean): ToolHandler[] {
+/** One line per matching message: id, date, sender, subject, unread, snippet. */
+export async function searchMail(account: GoogleAccount, timeZone: string, query: string, max: number): Promise<string[]> {
+  const list = await account.api<{ messages?: { id: string }[] }>(`${GMAIL}/messages`, { params: { q: query, maxResults: max } });
+  const ids = (list.messages ?? []).map((m) => m.id);
+  const msgs = await Promise.all(
+    ids.map((id) =>
+      account.api<Message>(`${GMAIL}/messages/${id}`, {
+        params: { format: 'metadata', metadataHeaders: ['From', 'To', 'Subject', 'Date'] },
+      }),
+    ),
+  );
+  return msgs.map((m) => {
+    const date = m.internalDate ? toLocalShort(new Date(Number(m.internalDate)), timeZone) : header(m.payload, 'Date');
+    const unread = m.labelIds?.includes('UNREAD') ? ' · unread' : '';
+    return `${m.id} · ${date} · ${header(m.payload, 'From')} · ${header(m.payload, 'Subject') || '(no subject)'}${unread} · ${m.snippet ?? ''}`;
+  });
+}
+
+/**
+ * The messages matching a query with their text, for reading closely rather
+ * than guessing from subject lines: "date · from · subject", then the body,
+ * whitespace squeezed and cut at `cap` characters.
+ */
+export async function mailWithBodies(account: GoogleAccount, timeZone: string, query: string, max: number, cap: number): Promise<string[]> {
+  const list = await account.api<{ messages?: { id: string }[] }>(`${GMAIL}/messages`, { params: { q: query, maxResults: max } });
+  const msgs = await Promise.all((list.messages ?? []).map((m) => account.api<Message>(`${GMAIL}/messages/${m.id}`, { params: { format: 'full' } })));
+  return msgs.map((m) => {
+    const date = m.internalDate ? toLocalShort(new Date(Number(m.internalDate)), timeZone) : header(m.payload, 'Date');
+    const text = messageText(m.payload).text.replace(/\s+/g, ' ').trim() || m.snippet || '';
+    const body = text.length > cap ? `${text.slice(0, cap)} […]` : text;
+    return `${date} · ${header(m.payload, 'From')} · ${header(m.payload, 'Subject') || '(no subject)'}\n  ${body}`;
+  });
+}
+
+export function gmailTools(main: GoogleAccount, timeZone: string, readOnly: boolean): ToolHandler[] {
+  // With extra Gmail accounts, every tool takes an `account`; message ids are per account.
+  const boxes = main.mailboxes();
+  const multi = boxes.length > 1;
+  const names = boxes.map((b) => b.name);
+  const accountArg = (all: boolean) =>
+    multi ? { account: { type: 'string', enum: all ? ['all', ...names] : names, description: all ? 'Which Gmail account; all to search every one.' : 'The Gmail account the message is in (from gmail_search).' } } : {};
+  const required = (...keys: string[]) => (multi ? [...keys, 'account'] : keys);
+  const pick = (name: unknown) => (multi ? boxes.find((b) => b.name === name) : main) ?? main;
+
   const tools: ToolHandler[] = [
     {
       def: {
@@ -147,32 +190,31 @@ export function gmailTools(account: GoogleAccount, timeZone: string, readOnly: b
           properties: {
             query: { type: 'string', description: 'Gmail search query; empty string for the latest mail.' },
             max: { type: 'integer', description: 'How many messages, 1-20.' },
+            ...accountArg(true),
           },
-          required: ['query', 'max'],
+          required: required('query', 'max'),
           additionalProperties: false,
         },
       },
       run: async (args) => {
+        const query = String(args.query ?? '');
         const max = Math.min(20, Math.max(1, Number(args.max) || 10));
-        const list = await account.api<{ messages?: { id: string }[] }>(`${GMAIL}/messages`, {
-          params: { q: String(args.query ?? ''), maxResults: max },
-        });
-        const ids = (list.messages ?? []).map((m) => m.id);
-        if (!ids.length) return 'No messages match.';
-        const msgs = await Promise.all(
-          ids.map((id) =>
-            account.api<Message>(`${GMAIL}/messages/${id}`, {
-              params: { format: 'metadata', metadataHeaders: ['From', 'To', 'Subject', 'Date'] },
-            }),
-          ),
+        if (!multi) {
+          const lines = await searchMail(main, timeZone, query, max);
+          return lines.length ? lines.join('\n') : 'No messages match.';
+        }
+        const targets = args.account === 'all' || !names.includes(String(args.account)) ? boxes : [pick(args.account)];
+        const out = await Promise.all(
+          targets.map(async (b) => {
+            try {
+              const lines = await searchMail(b, timeZone, query, max);
+              return lines.length ? lines.map((l) => `[${b.name}] ${l}`).join('\n') : `[${b.name}] no messages match.`;
+            } catch (err) {
+              return `[${b.name}] couldn't be searched: ${err instanceof Error ? err.message : String(err)}`;
+            }
+          }),
         );
-        return msgs
-          .map((m) => {
-            const date = m.internalDate ? toLocalShort(new Date(Number(m.internalDate)), timeZone) : header(m.payload, 'Date');
-            const unread = m.labelIds?.includes('UNREAD') ? ' · unread' : '';
-            return `${m.id} · ${date} · ${header(m.payload, 'From')} · ${header(m.payload, 'Subject') || '(no subject)'}${unread} · ${m.snippet ?? ''}`;
-          })
-          .join('\n');
+        return out.join('\n');
       },
     },
     {
@@ -185,14 +227,16 @@ export function gmailTools(account: GoogleAccount, timeZone: string, readOnly: b
           properties: {
             id: { type: 'string', description: 'Message id from gmail_search.' },
             thread: { type: 'boolean', description: 'True to read the whole thread this message is in.' },
+            ...accountArg(false),
           },
-          required: ['id', 'thread'],
+          required: required('id', 'thread'),
           additionalProperties: false,
         },
       },
       run: async (args) => {
         const id = encodeURIComponent(String(args.id ?? '').trim());
         if (!id) throw new Error('id is required.');
+        const account = pick(args.account);
         if (!args.thread) return formatMessage(await account.api<Message>(`${GMAIL}/messages/${id}`, { params: { format: 'full' } }), timeZone, MESSAGE_CAP);
         const { threadId } = await account.api<Message>(`${GMAIL}/messages/${id}`, { params: { format: 'minimal' } });
         const thread = await account.api<{ messages?: Message[] }>(`${GMAIL}/threads/${threadId}`, { params: { format: 'full' } });
@@ -221,12 +265,14 @@ export function gmailTools(account: GoogleAccount, timeZone: string, readOnly: b
           subject: { type: 'string', description: 'Subject; empty string when replying keeps "Re: <original>".' },
           body: { type: 'string', description: 'Plain-text body.' },
           reply_to_id: { type: 'string', description: 'Message id being replied to, or empty string for a new email.' },
+          ...(multi ? { account: { type: 'string', enum: names, description: 'The Gmail account to save the draft in: the one the replied-to message is in, else main.' } } : {}),
         },
-        required: ['to', 'cc', 'subject', 'body', 'reply_to_id'],
+        required: required('to', 'cc', 'subject', 'body', 'reply_to_id'),
         additionalProperties: false,
       },
     },
     run: async (args) => {
+      const account = pick(args.account);
       let subject = String(args.subject ?? '');
       let threadId: string | undefined;
       let inReplyTo: string | undefined;
@@ -249,7 +295,7 @@ export function gmailTools(account: GoogleAccount, timeZone: string, readOnly: b
         method: 'POST',
         body: { message: { raw, ...(threadId ? { threadId } : {}) } },
       });
-      return `Draft saved in Gmail Drafts (not sent), id ${draft.id}: to ${oneLine(String(args.to))}, subject "${oneLine(subject)}".`;
+      return `Draft saved in ${multi ? `the ${account.name} account's ` : ''}Gmail Drafts (not sent), id ${draft.id}: to ${oneLine(String(args.to))}, subject "${oneLine(subject)}".`;
     },
   });
   return tools;

@@ -44,6 +44,12 @@ export interface VideoInfo {
   subtitles?: Record<string, CaptionFormat[]>;
   automatic_captions?: Record<string, CaptionFormat[]>;
   _type?: string;
+  extractor_key?: string;
+  /** yt-dlp's best picture of the item: for an Instagram image slide, the image itself. */
+  thumbnail?: string;
+  formats?: unknown[];
+  /** A playlist's items; yt-dlp leaves null where an item failed. */
+  entries?: (VideoInfo | null)[];
 }
 
 /**
@@ -161,7 +167,10 @@ const reason = (err: unknown) => {
  * `language` is the spoken language's English name, for transcription.
  */
 const TIKTOK_PHOTO = /^https?:\/\/(?:www\.|m\.)?tiktok\.com\/@([^/?#]+)\/photo\/(\d+)/i;
-const MAX_SLIDES = 12;
+/** Instagram carousels hold up to 20; TikTok photo posts up to 35. */
+const MAX_SLIDES = 20;
+/** --ignore-no-formats-error, which youtube-dl-exec's flag types leave out. */
+const NO_FORMATS_OK = { ignoreNoFormatsError: true } as object;
 
 /** Where a TikTok short link (vm.tiktok.com, tiktok.com/t/...) leads; other links come back as they are. */
 async function resolveTikTok(url: string): Promise<string> {
@@ -199,15 +208,11 @@ export function tiktokSlides(html: string): { caption?: string; author?: string;
   }
 }
 
-async function readTikTokPhotos(user: string, id: string): Promise<{ content: string; images: ImagePart[] }> {
-  const page = `https://www.tiktok.com/@${user}/video/${id}`;
-  const res = await fetch(page, { headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'en-US,en;q=0.9' }, signal: AbortSignal.timeout(20_000) });
-  if (!res.ok) throw new Error(`Couldn't read that TikTok photo post: HTTP ${res.status}`);
-  const post = tiktokSlides(await res.text());
-  if (!post) throw new Error("Couldn't read that TikTok photo post: TikTok didn't send its slides. Ask for screenshots of them.");
+/** Downloads slide images in order, noting (1-based) the ones that failed. */
+async function fetchSlides(urls: string[]): Promise<{ images: ImagePart[]; failed: number[] }> {
   const images: ImagePart[] = [];
   const failed: number[] = [];
-  for (const [n, url] of post.images.slice(0, MAX_SLIDES).entries()) {
+  for (const [n, url] of urls.slice(0, MAX_SLIDES).entries()) {
     try {
       const img = await fetchImage(url);
       images.push({ type: 'image', url, mimeType: img.mimeType, data: img.data });
@@ -215,6 +220,16 @@ async function readTikTokPhotos(user: string, id: string): Promise<{ content: st
       failed.push(n + 1);
     }
   }
+  return { images, failed };
+}
+
+async function readTikTokPhotos(user: string, id: string): Promise<{ content: string; images: ImagePart[] }> {
+  const page = `https://www.tiktok.com/@${user}/video/${id}`;
+  const res = await fetch(page, { headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'en-US,en;q=0.9' }, signal: AbortSignal.timeout(20_000) });
+  if (!res.ok) throw new Error(`Couldn't read that TikTok photo post: HTTP ${res.status}`);
+  const post = tiktokSlides(await res.text());
+  if (!post) throw new Error("Couldn't read that TikTok photo post: TikTok didn't send its slides. Ask for screenshots of them.");
+  const { images, failed } = await fetchSlides(post.images);
   if (!images.length) throw new Error("Couldn't download that TikTok photo post's slides. Ask for screenshots of them.");
   const lines = [
     `TikTok photo post by @${post.author ?? user}, ${post.images.length} slides.`,
@@ -226,6 +241,53 @@ async function readTikTokPhotos(user: string, id: string): Promise<{ content: st
   return { content: lines.join('\n'), images };
 }
 
+/**
+ * The slides of an Instagram post that has pictures in it: a carousel
+ * (which yt-dlp reports as a playlist) or a single-image post. yt-dlp has no
+ * video formats for an image, but its thumbnail is the picture itself. A
+ * video slide in a carousel comes as its cover picture, and is listed in
+ * `videos` (1-based). Undefined for a plain reel, which reads as a video.
+ */
+export function instagramSlides(info: VideoInfo): { images: string[]; videos: number[]; missing: number[] } | undefined {
+  if (!/^instagram/i.test(info.extractor_key ?? '')) return undefined;
+  const isImage = (e: VideoInfo) => !e.formats?.length;
+  const items = info._type === 'playlist' ? (info.entries ?? []) : isImage(info) ? [info] : [];
+  if (!items.length) return undefined;
+  const images: string[] = [];
+  const videos: number[] = [];
+  const missing: number[] = [];
+  for (const [n, e] of items.entries()) {
+    if (!e?.thumbnail?.startsWith('https://')) {
+      missing.push(n + 1);
+      continue;
+    }
+    if (!isImage(e)) videos.push(n + 1);
+    images.push(e.thumbnail);
+  }
+  return images.length ? { images, videos, missing } : undefined;
+}
+
+async function readInstagramSlides(info: VideoInfo, slides: { images: string[]; videos: number[]; missing: number[] }): Promise<{ content: string; images: ImagePart[] }> {
+  const { images, failed } = await fetchSlides(slides.images);
+  if (!images.length) throw new Error("Couldn't download that Instagram post's pictures. Ask for screenshots of the slides.");
+  const total = slides.images.length + slides.missing.length;
+  const by = info.uploader ?? info.channel;
+  const lines = [
+    `Instagram ${total > 1 ? `carousel post, ${total} slides` : 'picture post'}${by ? ` by ${by}` : ''}.`,
+    ...(info.webpage_url ? [`URL: ${info.webpage_url}`] : []),
+    '',
+    'Caption:',
+    info.description?.trim() ? clip(info.description.trim(), MAX_DESCRIPTION_CHARS, 'caption') : '(none)',
+    '',
+    `${images.length} ${images.length === 1 ? 'picture is' : 'slides are'} attached in order: read the text on each one.`,
+  ];
+  if (slides.videos.length) lines.push(`(Slides ${slides.videos.join(', ')} are videos: only their cover picture is attached, not what's said in them.)`);
+  if (slides.images.length > MAX_SLIDES) lines.push(`(Only the first ${MAX_SLIDES} slides are attached.)`);
+  if (slides.missing.length) lines.push(`(Instagram gave no picture for slides ${slides.missing.join(', ')}.)`);
+  if (failed.length) lines.push(`(Slides ${failed.join(', ')} of those with pictures couldn't be downloaded.)`);
+  return { content: lines.join('\n'), images };
+}
+
 export async function readVideo(url: string, language?: string): Promise<{ content: string; images: ImagePart[] }> {
   // yt-dlp opens any page it's given; keep it off the home network.
   await assertPublic(new URL(url));
@@ -233,12 +295,16 @@ export async function readVideo(url: string, language?: string): Promise<{ conte
   if (photo) return readTikTokPhotos(photo[1]!, photo[2]!);
   let info: VideoInfo;
   try {
-    info = (await youtubedl(url, { ...ytdlpFlags(), dumpSingleJson: true, skipDownload: true, noPlaylist: true })) as unknown as VideoInfo;
+    // An Instagram picture has no video formats; without this flag yt-dlp
+    // drops every image slide of a carousel (or fails a one-picture post).
+    info = (await youtubedl(url, { ...ytdlpFlags(), dumpSingleJson: true, skipDownload: true, noPlaylist: true, ...NO_FORMATS_OK })) as unknown as VideoInfo;
   } catch (err) {
     const why = reason(err);
     const login = /login|log in|sign in|cookies|private|rate-limit/i.test(why);
     throw new Error(`Couldn't read that video${login ? ' (the site wants a signed-in account to show it)' : ''}: ${why.replace(/^ERROR:\s*/, '')}`);
   }
+  const slides = instagramSlides(info);
+  if (slides) return readInstagramSlides(info, slides);
   if (info._type === 'playlist') throw new Error('That link is a playlist or profile, not one video. Ask for the specific video.');
 
   let transcript: string | undefined;
@@ -301,9 +367,9 @@ export async function readVideo(url: string, language?: string): Promise<{ conte
 }
 
 export const VIDEO_PROMPT = `
-- Video links (YouTube, Instagram reels, TikTok and the like) open with watch_video, which gives the title, creator, description or caption, a transcript (from captions, or transcribed from the audio on the PC when there are none), and a few frames from short videos. For a recipe, put it together from all of them: creators often list ingredients in the description or on screen and only say the steps. A transcript made on the PC can mishear names and amounts, so prefer what's written on screen or in the caption when they disagree. TikTok photo posts (slideshows) open with watch_video too and come back as the slides, so read the text on them. If the caption or title shows the video isn't in English, pass that language to watch_video. Say plainly what's missing (no amounts given, no speech) instead of inventing it.
+- Video links (YouTube, Instagram reels, TikTok and the like) open with watch_video, which gives the title, creator, description or caption, a transcript (from captions, or transcribed from the audio on the PC when there are none), and a few frames from short videos. For a recipe, put it together from all of them: creators often list ingredients in the description or on screen and only say the steps. A transcript made on the PC can mishear names and amounts, so prefer what's written on screen or in the caption when they disagree. Instagram picture and carousel posts (/p/ links) and TikTok photo posts (slideshows) open with watch_video too and come back as the caption and the slide pictures, so read the text on every slide; never ask for screenshots of a post before trying watch_video. If the caption or title shows the video isn't in English, pass that language to watch_video. Say plainly what's missing (no amounts given, no speech) instead of inventing it.
 - When they share a video, open it with watch_video in that reply before saying anything about what's in it. Prices, dishes and amounts come only from what watch_video returned, never from what's typical or from an earlier reply.
-- A recipe video shared without other instructions is for saving: save it with their other recipe notes in that reply, marking anything the video leaves out ("amounts not given"), then offer to fill the gap. Don't ask first whether to save it.`;
+- A recipe video shared without other instructions (in #recipes above all) is for saving: save it with their other recipe notes in that reply, marking anything the video leaves out ("amounts not given"), then offer to fill the gap. Don't ask first whether to save it.`;
 
 export function videoTools(): ToolHandler[] {
   return [
@@ -311,8 +377,11 @@ export function videoTools(): ToolHandler[] {
       def: {
         name: 'watch_video',
         description:
-          'Read a video link (YouTube, Instagram, TikTok including photo posts, and most other video sites): title, creator, description or caption, a transcript (from its captions, or transcribed from the audio when it has none), and 8 frames to read on-screen text from (for videos up to 4 minutes, or 15 when there are no captions).',
-        strict: true,
+          'Read a video link (YouTube, Instagram including picture and carousel posts, TikTok including photo posts, and most other video sites): title, creator, description or caption, a transcript (from its captions, or transcribed from the audio when it has none), and 8 frames to read on-screen text from (for videos up to 4 minutes, or 15 when there are no captions).',
+        // Not strict: the API compiles every strict schema into one grammar
+        // with a size limit, and the slots go to tools that change things.
+        // A malformed call here only reads, and fails with a clear error.
+        strict: false,
         input_schema: {
           type: 'object',
           properties: {

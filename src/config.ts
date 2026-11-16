@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { systemTimeZone } from './modules/assistant/time.js';
 import { EFFORTS, type Effort, type OwnerProfile } from './modules/assistant/llm.js';
-import type { GoogleConfig } from './modules/assistant/google.js';
+import { MAILBOX_NAME, extraTokenFile, type GoogleConfig } from './modules/assistant/google.js';
 
 export interface Config {
   discord: {
@@ -14,8 +14,6 @@ export interface Config {
   /** The Obsidian vault: the training log lives in it, and the assistant reads and writes notes there. */
   vault: {
     root: string;
-    /** Squire's own folder inside the vault. */
-    folder: string;
   };
   ollama: {
     host: string;
@@ -41,6 +39,14 @@ export interface Config {
     remindersFile: string;
     tasksFile: string;
     memoryFile: string;
+    journalFile: string;
+    /** What each reply did and cost; local only. */
+    activityDir: string;
+    /** Local hour for the morning brief, or undefined when it's off. */
+    briefHour?: number;
+    briefFile: string;
+    /** The brief's channel ID; unset means #misc, kept by ID once found. */
+    briefChannelId?: string;
     profile: OwnerProfile;
     /** Gmail and Calendar; off unless an OAuth client is configured. */
     google?: GoogleConfig;
@@ -78,9 +84,21 @@ function loadAssistant(): Config['assistant'] {
     console.error(`ASSISTANT_TIMEZONE "${timeZone}" is not a time zone name, e.g. America/Los_Angeles.`);
     process.exit(1);
   }
+  const briefSetting = (optional('MORNING_BRIEF_HOUR') ?? '8').toLowerCase();
+  const briefHour = briefSetting === 'off' ? undefined : Number(briefSetting);
+  if (briefHour !== undefined && !(Number.isInteger(briefHour) && briefHour >= 0 && briefHour <= 23)) {
+    console.error('MORNING_BRIEF_HOUR must be an hour from 0 to 23, or off.');
+    process.exit(1);
+  }
   const clientId = optional('GOOGLE_CLIENT_ID');
   const listUrls = (optional('MAPS_LIST_URLS') ?? '').split(/[\s,]+/).filter(Boolean);
   const clientSecret = optional('GOOGLE_CLIENT_SECRET');
+  const extraNames = (optional('GOOGLE_EXTRA_ACCOUNTS') ?? '').toLowerCase().split(/[\s,]+/).filter(Boolean);
+  const badName = extraNames.find((n) => !MAILBOX_NAME.test(n));
+  if (badName) {
+    console.error(`GOOGLE_EXTRA_ACCOUNTS: "${badName}" should be a short name of letters, digits and dashes (not main or all), like work.`);
+    process.exit(1);
+  }
   return {
     channelIds,
     model: optional('ASSISTANT_MODEL') ?? 'claude-haiku-5-5',
@@ -92,10 +110,20 @@ function loadAssistant(): Config['assistant'] {
     remindersFile: optional('REMINDERS_FILE') ?? fileURLToPath(new URL('../data/reminders.json', import.meta.url)),
     tasksFile: optional('TASKS_FILE') ?? fileURLToPath(new URL('../data/tasks.json', import.meta.url)),
     memoryFile: optional('MEMORY_FILE') ?? fileURLToPath(new URL('../data/memory.json', import.meta.url)),
+    journalFile: optional('JOURNAL_FILE') ?? fileURLToPath(new URL('../data/journal.json', import.meta.url)),
+    activityDir: optional('ACTIVITY_DIR') ?? fileURLToPath(new URL('../data/activity', import.meta.url)),
+    briefHour,
+    briefFile: fileURLToPath(new URL('../data/brief.json', import.meta.url)),
+    briefChannelId: optional('MORNING_BRIEF_CHANNEL_ID'),
     profile: { location: parseLocation(optional('ASSISTANT_LOCATION'), timeZone), about: optional('ASSISTANT_ABOUT_ME') },
     google:
       clientId && clientSecret
-        ? { clientId, clientSecret, tokenFile: optional('GOOGLE_TOKEN_FILE') ?? fileURLToPath(new URL('../data/google-token.json', import.meta.url)) }
+        ? {
+            clientId,
+            clientSecret,
+            tokenFile: optional('GOOGLE_TOKEN_FILE') ?? fileURLToPath(new URL('../data/google-token.json', import.meta.url)),
+            extraMail: extraNames.map((name) => ({ name, tokenFile: extraTokenFile(name) })),
+          }
         : undefined,
     places: listUrls.length
       ? {
@@ -137,7 +165,6 @@ export function loadConfig(): Config {
     },
     vault: {
       root: vaultRoot,
-      folder: optional('OBSIDIAN_FOLDER') ?? 'Squire',
     },
     ollama: {
       host: optional('OLLAMA_HOST') ?? 'http://localhost:11434',
