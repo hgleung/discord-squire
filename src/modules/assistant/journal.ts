@@ -35,6 +35,8 @@ export interface JournalLine {
   fromOwner: boolean;
   at: Date;
   text: string;
+  /** Squire's morning brief: a report of what it found, not something the owner said or took on. */
+  brief?: boolean;
 }
 
 interface JournalFile {
@@ -51,6 +53,8 @@ export const IDLE_MS = 30 * 60_000;
 export const BACKFILL_MS = 10 * 86_400_000;
 const MAX_ENTRIES = 500;
 const MAX_SUMMARY_CHARS = 1200;
+/** An entry with later updates appended stays under this. */
+const MAX_UPDATED_CHARS = 2400;
 const MAX_LINE_CHARS = 1500;
 const MAX_TRANSCRIPT_CHARS = 40_000;
 const RECENT_IN_PROMPT = 5;
@@ -105,6 +109,21 @@ export class Journal {
     this.save();
   }
 
+  /**
+   * Notes on an earlier entry that a later conversation, in any channel,
+   * settled something it left open, so prompts and the brief stop treating it
+   * as open. Unknown ids are ignored.
+   */
+  settle(id: string, note: string, at: Date, channelName: string, timeZone: string): boolean {
+    const e = this.data.entries.find((x) => x.id === id);
+    if (!e) return false;
+    const line = `Update ${day(at.toISOString(), timeZone)} (#${channelName}): ${note.trim()}`;
+    if (e.summary.includes(line)) return false;
+    e.summary = `${e.summary}\n${line}`.slice(-MAX_UPDATED_CHARS);
+    this.save();
+    return true;
+  }
+
   /** Entries that mention the words, best match first. */
   search(text: string, limit = RECALL_HITS, exclude = new Set<string>()): JournalEntry[] {
     const words = keywords(text);
@@ -133,14 +152,14 @@ export class Journal {
   prompt(timeZone: string, now = new Date()): string {
     const shown = this.standing(now);
     if (shown.length === 0) return '';
-    return `\n\nYour journal of earlier conversations (oldest first; recall finds older ones):\n${shown.map((e) => format(e, timeZone)).join('\n')}`;
+    return `\n\nYour journal of earlier conversations (oldest first; recall finds older ones):\n${shown.map((e) => formatEntry(e, timeZone)).join('\n')}`;
   }
 
   /** Older conversations that share words with the message being answered, as a note for that turn. */
   related(text: string, timeZone: string, now = new Date()): string {
     const skip = new Set(this.standing(now).map((e) => e.id));
     const hits = this.search(text, RELATED_IN_PROMPT, skip);
-    return hits.length ? `[Older conversations that may be related, from your journal:\n${hits.map((e) => format(e, timeZone)).join('\n')}]` : '';
+    return hits.length ? `[Older conversations that may be related, from your journal:\n${hits.map((e) => formatEntry(e, timeZone)).join('\n')}]` : '';
   }
 
   private save() {
@@ -151,7 +170,7 @@ export class Journal {
   }
 }
 
-function format(e: JournalEntry, timeZone: string): string {
+export function formatEntry(e: JournalEntry, timeZone: string): string {
   const ongoing = e.ongoing ? ` (ongoing until ${e.ongoing.until}: ${e.ongoing.topic})` : '';
   return `- ${day(e.from, timeZone)} · #${e.channelName}${ongoing}: ${e.summary.replace(/\s*\n\s*/g, ' ')}`;
 }
@@ -173,9 +192,18 @@ const SUMMARY_SYSTEM = `You keep a journal for Squire, a personal assistant, so 
 - Keep the specifics a later conversation would need: dates, places, names, bookings and confirmation numbers, prices, decisions made, preferences stated, and where things were saved (note paths, lists, calendar events, reminders).
 - Say what was left open: questions not answered yet, things still to book or decide, anything Squire offered to do.
 - Only what the conversation shows. Don't add advice or guesses.
-- If the plan has a date still ahead (a trip, an event, a deadline), end with one last line exactly like: ONGOING 2027-06-12: Japan trip (Tokyo, Osaka)
+- Lines from "Squire (morning brief)" are Squire's daily report: weather, the day's plans, alerts from the inbox, items carried over from earlier. Don't retell them, and don't list their items as open or still to do: only what the owner said or did about one counts (they asked about it, said they'd do it, said it was handled or not worth listing). A brief's mention of a trip is no reason for an ONGOING line. If the owner said nothing about the brief beyond thanks or praise, answer SKIP.
+- Earlier entries for plans still ahead are listed after the conversation, each with its id. When this conversation settles or changes something one of them left open (answers its question, confirms an amount, cancels or moves a booking), add one line per entry exactly like: SETTLED 1ab618: the vanilla in the ube muffin filling is 1/2 tsp, confirmed by the owner
+  even if it came up in passing in an unrelated conversation. Only for what the conversation clearly shows.
+- If the plan has a date still ahead (a trip, an event, a deadline), end with one last line exactly like: ONGOING 2027-04-17: Japan trip (Tokyo, Osaka)
   using the last day it matters. Leave that line out otherwise.
-- If there's nothing worth remembering (a greeting, a one-word test), answer only: SKIP`;
+- If there's nothing worth remembering (a greeting, a one-word test), answer only: SKIP (but still add any SETTLED lines after it).`;
+
+/** What a conversation's journal run gives back: its entry, if worth keeping, and what it settled in earlier entries. */
+export interface Summary {
+  entry?: Pick<JournalEntry, 'summary' | 'ongoing'>;
+  settled: { id: string; note: string }[];
+}
 
 /** Turns one conversation into a journal entry; undefined when it isn't worth keeping. */
 export async function summarize(
@@ -185,22 +213,40 @@ export async function summarize(
   lines: JournalLine[],
   timeZone: string,
   onUsage?: (usage: Usage) => void,
-): Promise<Pick<JournalEntry, 'summary' | 'ongoing'> | undefined> {
+  /** Earlier entries for plans still ahead, which this conversation may settle. */
+  open: JournalEntry[] = [],
+): Promise<Summary> {
   let transcript = lines
-    .map((l) => `[${toLocalShort(l.at, timeZone)}] ${l.fromOwner ? 'Owner' : 'Squire'}: ${l.text.length > MAX_LINE_CHARS ? `${l.text.slice(0, MAX_LINE_CHARS)}…` : l.text}`)
+    .map((l) => `[${toLocalShort(l.at, timeZone)}] ${l.fromOwner ? 'Owner' : l.brief ? 'Squire (morning brief)' : 'Squire'}: ${l.text.length > MAX_LINE_CHARS ? `${l.text.slice(0, MAX_LINE_CHARS)}…` : l.text}`)
     .join('\n');
   if (transcript.length > MAX_TRANSCRIPT_CHARS) transcript = `…${transcript.slice(-MAX_TRANSCRIPT_CHARS)}`;
+  const earlier = open.length
+    ? `\n\nEarlier entries for plans still ahead (id · channel: entry):\n${open.map((e) => `- ${e.id} · #${e.channelName}: ${e.summary.replace(/\s*\n\s*/g, ' ')}`).join('\n')}`
+    : '';
   const gen = await llm.generate(model, {
     system: SUMMARY_SYSTEM,
     tools: [],
-    turns: [{ role: 'user', content: [{ type: 'text', text: `Conversation in #${channelName}:\n\n${transcript}` }] }],
+    turns: [{ role: 'user', content: [{ type: 'text', text: `Conversation in #${channelName}:\n\n${transcript}${earlier}` }] }],
     web: { maxUses: 0 },
   });
   if (gen.usage) onUsage?.(gen.usage);
   return parseSummary(gen.text);
 }
 
-export function parseSummary(text: string): Pick<JournalEntry, 'summary' | 'ongoing'> | undefined {
+export function parseSummary(text: string): Summary {
+  const settled: Summary['settled'] = [];
+  const rest = text
+    .split('\n')
+    .filter((line) => {
+      const m = /^\s*SETTLED\s+([\w-]+)\s*:\s*(.+?)\s*$/.exec(line);
+      if (m) settled.push({ id: m[1]!, note: m[2]!.slice(0, 300) });
+      return !m;
+    })
+    .join('\n');
+  return { entry: parseEntry(rest), settled };
+}
+
+function parseEntry(text: string): Pick<JournalEntry, 'summary' | 'ongoing'> | undefined {
   const clean = text.trim();
   if (!clean || /^SKIP\b/.test(clean)) return undefined;
   const match = /\n?\s*ONGOING (\d{4}-\d{2}-\d{2}):\s*(.+?)\s*$/.exec(clean);
@@ -227,7 +273,7 @@ export function journalTools(journal: Journal, timeZone: string): ToolHandler[] 
       },
       run(args) {
         const hits = journal.search(String(args.query ?? ''));
-        return hits.length ? hits.map((e) => format(e, timeZone)).join('\n') : `Nothing in the journal about "${args.query}".`;
+        return hits.length ? hits.map((e) => formatEntry(e, timeZone)).join('\n') : `Nothing in the journal about "${args.query}".`;
       },
     },
   ];

@@ -13,9 +13,11 @@ import { buildConversation, splitForDiscord, threadReplies, unanswered, type Cha
 import { expandShortLink, fetchImage, fetchPage, findUrls, isDiscordCdn, isPrivateAddress, isShortLink, MAX_IMAGE_BYTES, parseDiscordLink, recipeFromHtml, resizedDiscordUrl, type Fetcher } from './links.js';
 import { linkTools } from './linkTools.js';
 import { messageAttachments, messageText } from './discordLinks.js';
-import { captionText, describeVideo, pickCaptions, readVideo, tiktokSlides, instagramSlides, videoTools } from './video.js';
+import { FRAME_COUNT_CLOSE, captionText, describeVideo, pickCaptions, readVideo, tiktokSlides, instagramSlides, videoTools } from './video.js';
 import { cleanTranscript } from './transcribe.js';
 import { TaskRunner, TaskStore } from './tasks.js';
+import { migrateTaskNotes, noteFields } from './taskNotes.js';
+import { jobPrompt, RECIPE_JOB_PROMPT, seedPrompts } from './factory.js';
 import { profilePrompt, Sources, type Generation, type GenerateRequest, type LLM, type ModelOptions, type ToolCall, type Turn } from './llm.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { fromMessage, grammarTooLarge, limitStrict, MAX_STRICT_SCHEMA_CHARS, MAX_STRICT_TOOLS, toMessages, webTools } from './anthropic.js';
@@ -29,12 +31,14 @@ import { Vault } from '../../vault.js';
 import { isOpenAt, mapsLink, parseListResponse, SavedPlaces, todaysHours, type PlaceDetails } from './places.js';
 import { placesTools } from './placesTools.js';
 import { Journal, journalTools, parseSummary, splitSessions, summarize, type JournalLine } from './journal.js';
-import { Agent, withRelated } from './agent.js';
+import { Agent, offersToSaveToNote, withRelated } from './agent.js';
 import { ActivityLog, newTrace, traceTools } from './activity.js';
 import { addUsage, costUsd, dollars, noUsage } from './usage.js';
 import { reviewDigest, usageSummary } from './report.js';
-import { BriefState, briefChannel, briefFacts, dropMissingNotes } from './brief.js';
+import { BRIEF_PROMPT, BriefState, briefChannel, briefFacts, briefGreeting, briefTools, briefWeatherPlaces, dropMissingNotes, dropWeatherJunk, isBrief, writeBrief } from './brief.js';
+import { TicketStore, ticketDigest, ticketTarget } from './tickets.js';
 import { rememberTranscript, voiceLine } from './voice.js';
+import { CATCH_UP_GRACE_MS, LastSeen, catchUpHeader, catchUpNote, catchUpSince, missedMessages } from './catchUp.js';
 
 let failures = 0;
 const check = (label: string, ok: boolean, detail = '') => {
@@ -192,6 +196,17 @@ check('newest image sits before its line, lines merged', lastParts.map((b) => b.
     ],
   } as never);
   check('anthropic: pages web_fetch opened are tracked, failed ones not', fetched.sources.opened.size === 1 && fetched.sources.opened.get('https://cook.example/curry') === 'Curry', [...fetched.sources.opened.keys()].join(','));
+  const searched = fromMessage({
+    stop_reason: 'end_turn',
+    content: [
+      { type: 'text', text: 'Springfield, OR Sun 11/15 66° 51°; Mon 11/16 59° 43° (reading inferred from the layout)' },
+      { type: 'server_tool_use', id: 's1', name: 'web_search', input: { query: 'sf weather' } },
+      { type: 'web_search_tool_result', tool_use_id: 's1', content: [] },
+      { type: 'text', text: 'Good morning! ' },
+      { type: 'text', text: 'Sunny in Springfield today, high 61°, low 52°.' },
+    ],
+  } as never);
+  check('anthropic: finalText keeps only what came after the last search', searched.finalText === 'Good morning! Sunny in Springfield today, high 61°, low 52°.' && searched.text.includes('11/15'), JSON.stringify(searched.finalText));
 }
 
 
@@ -280,6 +295,7 @@ check(
     await settle();
     const first = runner.list().find((t) => t.id === task.id)!;
     check('task waits after wait_until', first.status === 'waiting' && first.wakeAt === later.toISOString(), first.status);
+    check('a waiting task\'s note says doing', !!first.note && noteFields(vault.read(first.note) ?? '').status === 'doing', first.note);
     check('progress update posted without a ping', posts.length === 1 && posts[0]!.content.includes('$912') && !posts[0]!.ping);
     const brief = JSON.stringify(seen[0]?.[0] ?? '');
     const workerTools = offered[0] ?? [];
@@ -311,6 +327,12 @@ check(
       notes.length === 1 && notes[0]!.endsWith('Tokyo fares.md') && vault.read(notes[0]!)!.includes('$780') && final!.content.includes(`Saved to ${notes[0]}`),
       notes.join(', '),
     );
+    const tokyo = noteFields(vault.read(notes[0]!)!);
+    check(
+      'finished note has status done and the old fields',
+      tokyo.status === 'done' && tokyo.outcome === 'done' && tokyo.channel === '#travel' && !!tokyo.requested && !!tokyo.finished && String(tokyo.tags) === 'squire-task' && tokyo.output === undefined,
+      JSON.stringify(tokyo),
+    );
 
     const doomed = runner.start({ title: 'Doomed', goal: 'g', doneWhen: 'd', deadline: new Date(Date.now() + 3600_000), channelId: 'c', channelName: 'misc' });
     runner.cancel(doomed.id);
@@ -319,8 +341,149 @@ check(
     runner.start({ title: 'Quick', goal: 'g', doneWhen: 'd', deadline: new Date(Date.now() + 3600_000), tier: 'fast', channelId: 'c', channelName: 'misc' });
     await settle();
     check('fast tier runs on the chat model', models.at(-1) === 'small-model', models.at(-1));
-    check('a failed task saves no note', vault.list('Squire/Tasks').length === 1);
+    const doomedNote = noteFields(vault.read(runner.list().find((t) => t.id === doomed.id)!.note ?? '') ?? '');
+    check('a cancelled task\'s note says failed, outcome cancelled', doomedNote.status === 'failed' && doomedNote.outcome === 'cancelled', JSON.stringify(doomedNote));
     check('cancelled task stays cancelled', runner.list().find((t) => t.id === doomed.id)?.status === 'cancelled');
+    check('the cancel message doesn\'t point to the note', !posts.some((p) => p.content.includes('Doomed') && p.content.includes('Saved to')));
+
+    // A task that saves a note links it as its output.
+    script.push(
+      step('', [{ id: 's1', name: 'save_note', input: { title: 'Kai Jeow', content: '- 4 eggs', mode: 'create', folder: 'Recipes/Meal', sources: ['owner'] } }]),
+      step('', [{ id: 's2', name: 'finish_task', input: { outcome: 'done', report: 'Saved it.' } }]),
+    );
+    const saver = runner.start({ title: 'Kai jeow note', goal: 'g', doneWhen: 'd', deadline: new Date(Date.now() + 3600_000), channelId: 'c', channelName: 'recipes' });
+    await settle();
+    const saverNote = noteFields(vault.read(runner.list().find((t) => t.id === saver.id)!.note!)!);
+    check('output links the note the task saved', saverNote.status === 'done' && saverNote.output === '[[Recipes/Meal/Kai Jeow]]', JSON.stringify(saverNote));
+    const saverPath = runner.list().find((t) => t.id === saver.id)!.note!;
+    const kaiNote = vault.read('Recipes/Meal/Kai Jeow.md') ?? '';
+    check('the saved note links back to its task', noteFields(kaiNote).tags !== undefined && noteFields(kaiNote)['source-task'] === `[[${saverPath.replace(/\.md$/, '')}]]` && kaiNote.includes('- 4 eggs'), kaiNote);
+
+    // Appending to a note of the owner's keeps their frontmatter and adds the link back.
+    vault.write('Recipes/Meal/Mine.md', '---\nrating: 5\n---\n\nMy recipe.\n');
+    script.push(
+      step('', [{ id: 'a1', name: 'save_note', input: { title: 'Mine', content: 'Added tip.', mode: 'append', folder: 'Recipes/Meal', sources: [] } }]),
+      step('', [{ id: 'a2', name: 'finish_task', input: { outcome: 'done', report: 'Added.' } }]),
+    );
+    const appender = runner.start({ title: 'Add a tip', goal: 'g', doneWhen: 'd', deadline: new Date(Date.now() + 3600_000), channelId: 'c', channelName: 'recipes' });
+    await settle();
+    const mine = vault.read('Recipes/Meal/Mine.md')!;
+    check('a changed note keeps its fields and gets source-task', noteFields(mine).rating === 5 && mine.includes('My recipe.') && mine.includes('Added tip.') && String(noteFields(mine)['source-task']).includes('Add a tip') && noteFields(vault.read(runner.list().find((t) => t.id === appender.id)!.note!)!).output === '[[Recipes/Meal/Mine]]', mine);
+
+    // A same-day task with the same title gets its own note, not the old one's.
+    script.push(step('', [{ id: 'k1', name: 'finish_task', input: { outcome: 'done', report: 'Again.' } }]));
+    const twin = runner.start({ title: 'Kai jeow note', goal: 'g2', doneWhen: 'd', deadline: new Date(Date.now() + 3600_000), channelId: 'c', channelName: 'recipes' });
+    await settle();
+    const twinPath = runner.list().find((t) => t.id === twin.id)!.note!;
+    check('a second task with the same title doesn\'t overwrite the first note', twinPath.endsWith('Kai jeow note 2.md') && vault.read(saverNote && runner.list().find((t) => t.id === saver.id)!.note!)!.includes('Saved it.'), twinPath);
+
+    // A note written by hand with status: todo is picked up and run.
+    const hand = 'Squire/Tasks/Pesto ratio.md';
+    vault.write(
+      hand,
+      '---\nstatus: todo\npriority: high # mine\njob: recipe\n---\n\n# Basil pesto ratio\n\n## Goal\nFind the basil to oil ratio\nin two real recipes.\n\n**Done when:** a ratio with two links\n\nMy own scribbles.\n',
+    );
+    vault.write('Squire/Tasks/No goal.md', '---\nstatus: todo\n---\n\nJust a thought.\n');
+    vault.write('Squire/Tasks/Elsewhere.md', '---\nstatus: todo\nchannel: "#nowhere"\n---\n\nGoal: x\nDone when: y\n');
+    script.push(step('', [{ id: 'h1', name: 'finish_task', input: { outcome: 'done', report: '**3:1** basil to oil.' } }]));
+    const before = posts.length;
+    runner.tick(); // no channel finder yet: Discord isn't connected, nothing is picked up
+    check('todo notes wait until channels can be found', noteFields(vault.read(hand)!).status === 'todo');
+    runner.setPoster(async (channelId, content, ping) => void posts.push({ channelId, content, ping }), (name) => ({ recipes: 'recipes-id', misc: 'misc-id' })[name]);
+    await Promise.all(runner.tick());
+    await settle();
+    const handTask = runner.list().find((t) => t.note === hand);
+    const handText = vault.read(hand)!;
+    const handFields = noteFields(handText);
+    check('a hand-written todo note is picked up', !!handTask && handTask.goal === 'Find the basil to oil ratio\nin two real recipes.' && handTask.doneWhen === 'a ratio with two links' && handTask.title === 'Basil pesto ratio', JSON.stringify(handTask && { g: handTask.goal, d: handTask.doneWhen, t: handTask.title }));
+    check('a recipe job with no channel reports in #recipes', handTask?.channelId === 'recipes-id' && posts.slice(before).some((p) => p.channelId === 'recipes-id' && p.content.includes('3:1')));
+    check('the hand note ends done, keeping its fields and text', handFields.status === 'done' && handFields.priority === 'high' && handText.includes('# mine') && handText.includes('My own scribbles.') && handText.includes('## Report') && handText.includes('3:1'), handText);
+    await Promise.all(runner.tick());
+    check('a finished hand note is not run again', runner.list().filter((t) => t.note === hand).length === 1);
+    const noGoal = noteFields(vault.read('Squire/Tasks/No goal.md')!);
+    check('a todo note with no goal is marked failed with the reason', noGoal.status === 'failed' && String(noGoal.outcome).includes('Goal'), JSON.stringify(noGoal));
+    const elsewhere = noteFields(vault.read('Squire/Tasks/Elsewhere.md')!);
+    check('a todo note naming an unknown channel is marked failed', elsewhere.status === 'failed' && String(elsewhere.outcome).includes('#nowhere'), JSON.stringify(elsewhere));
+
+    // Versioned prompts: the built-in recipe prompt was written to the vault as v1, production.
+    const v1 = vault.read('Factory/Prompts/recipe v1.md') ?? '';
+    check('the recipe prompt is seeded as v1 production', noteFields(v1).status === 'production' && noteFields(v1).job === 'recipe' && noteFields(v1).version === 1 && v1.includes('(estimate)'), v1.slice(0, 120));
+    check('seeding never touches a job that has a prompt', seedPrompts(vault).length === 0);
+    check('the production prompt is used', jobPrompt(vault, 'recipe').name === 'recipe v1');
+    vault.write('Factory/Prompts/recipe v2.md', '---\njob: recipe\nprocess_step: x\nstatus: testing\nversion: 2\n---\n\nV2 RULES: always say pineapple.\n');
+    check('a testing prompt is not used unless named', jobPrompt(vault, 'recipe').name === 'recipe v1' && jobPrompt(vault, 'recipe', 'recipe v2').text.includes('pineapple') && jobPrompt(vault, 'recipe', '[[Factory/Prompts/recipe v2]]').name === 'recipe v2');
+    let missing = '';
+    try { jobPrompt(vault, 'recipe', 'recipe v9'); } catch (err) { missing = (err as Error).message; }
+    check('a named prompt that doesn\'t exist is refused', missing.includes('recipe v9'), missing);
+    const bare = new Vault(mkdtempSync(join(tmpdir(), 'squire-bare-')));
+    check('with no prompt notes the built-in prompt is used', jobPrompt(bare, 'recipe').name === 'built-in' && jobPrompt(undefined, 'recipe').text === RECIPE_JOB_PROMPT);
+    rmSync(bare.root, { recursive: true, force: true });
+
+    script.push(step('', [{ id: 'j1', name: 'finish_task', input: { outcome: 'done', report: 'ok' } }]));
+    const jobTask = runner.start({ title: 'Reel recipe', goal: 'https://www.instagram.com/reel/x/', doneWhen: 'saved', deadline: new Date(Date.now() + 3600_000), channelId: 'c', channelName: 'recipes', job: 'recipe', prompt: 'recipe v2' });
+    await settle();
+    const jobSystem = systems.at(-1) ?? '';
+    check('a job task runs its named prompt, without the generic recipe rules', jobSystem.includes('pineapple') && jobSystem.includes('"recipe v2"') && !jobSystem.includes('target ÷ source servings'), jobSystem.slice(-200));
+    check('a recipe job task can watch videos', (offered.at(-1) ?? []).includes('watch_video') && !(offered[0] ?? []).includes('watch_video'));
+    const jobFields = noteFields(vault.read(runner.list().find((t) => t.id === jobTask.id)!.note!)!);
+    check('the task note names its job and prompt', jobFields.job === 'recipe' && jobFields.prompt === '[[Factory/Prompts/recipe v2]]', JSON.stringify(jobFields));
+    // Shadow mode, the recipe job's default: the note is proposed in the report and nothing else changes.
+    check('the recipe job note is seeded with shadow on', noteFields(vault.read('Factory/Jobs/recipe.md') ?? '').shadow === true);
+    script.push(
+      step('', [{ id: 'p1', name: 'save_note', input: { title: 'Shadow Soup', content: '- 1 cup stock', mode: 'create', folder: 'Recipes/Soup', sources: ['owner'] } }]),
+      step('', [{ id: 'p2', name: 'finish_task', input: { outcome: 'done', report: 'Proposed Recipes/Soup/Shadow Soup.' } }]),
+    );
+    const before2 = posts.length;
+    const shadowTask = runner.start({ title: 'Soup reel', goal: 'https://x.com/reel/1', doneWhen: 'saved', deadline: new Date(Date.now() + 3600_000), channelId: 'c', channelName: 'recipes', job: 'recipe' });
+    await settle();
+    const shadowTools = offered.at(-1) ?? [];
+    const shadowDone = runner.list().find((t) => t.id === shadowTask.id)!;
+    const shadowText = vault.read(shadowDone.note!)!;
+    check('shadow mode writes no recipe', vault.read('Recipes/Soup/Shadow Soup.md') === undefined && !shadowDone.output);
+    check('shadow mode has no reminder or memory tools', !shadowTools.includes('create_reminder') && !shadowTools.includes('remember') && shadowTools.includes('save_note'), shadowTools.join(','));
+    check('the proposal is in the task note', noteFields(shadowText).shadow === true && noteFields(shadowText).proposed === '[[Recipes/Soup/Shadow Soup]]' && shadowText.includes('## Proposed note') && shadowText.includes('- 1 cup stock'));
+    check('the Discord report says it waits for a promote', posts.slice(before2).some((p) => p.content.includes('proposed Recipes/Soup/Shadow Soup.md') && p.content.includes('promote')));
+    const promoted = runner.promote('soup reel');
+    const saved = vault.read('Recipes/Soup/Shadow Soup.md') ?? '';
+    const afterPromote = noteFields(vault.read(shadowDone.note!)!);
+    check('a promoted note links back to the shadow task', noteFields(saved)['source-task'] === `[[${shadowDone.note!.replace(/\.md$/, '')}]]`, saved);
+    check('promote saves the proposed note as it was checked', promoted.includes('Recipes/Soup/Shadow Soup.md') && saved.includes('- 1 cup stock'), promoted);
+    check('the task note links the promoted note', afterPromote.output === '[[Recipes/Soup/Shadow Soup]]' && !!afterPromote.promoted);
+    let again = '';
+    try { runner.promote('soup reel'); } catch (err) { again = (err as Error).message; }
+    check('a proposal is promoted only once', again.includes('No task'), again);
+    // A proposal whose target appeared meanwhile is refused, not overwritten.
+    script.push(
+      step('', [{ id: 'q1', name: 'save_note', input: { title: 'Clash', content: '- new', mode: 'create', folder: 'Recipes/Meal', sources: ['owner'] } }]),
+      step('', [{ id: 'q2', name: 'finish_task', input: { outcome: 'done', report: 'ok' } }]),
+    );
+    runner.start({ title: 'Clash reel', goal: 'g', doneWhen: 'd', deadline: new Date(Date.now() + 3600_000), channelId: 'c', channelName: 'recipes', job: 'recipe' });
+    await settle();
+    vault.write('Recipes/Meal/Clash.md', 'the owner wrote this\n');
+    let clash = '';
+    try { runner.promote(); } catch (err) { clash = (err as Error).message; }
+    check('promote never overwrites a note that appeared', clash.includes('exists now') && vault.read('Recipes/Meal/Clash.md') === 'the owner wrote this\n', clash);
+    vault.write('Factory/Jobs/recipe.md', '---\njob: recipe\nshadow: false\n---\n');
+    script.push(
+      step('', [{ id: 'r1', name: 'save_note', input: { title: 'Live Soup', content: '- 2 cups stock', mode: 'create', folder: 'Recipes/Soup', sources: ['owner'] } }]),
+      step('', [{ id: 'r2', name: 'finish_task', input: { outcome: 'done', report: 'Saved.' } }]),
+    );
+    runner.start({ title: 'Live reel', goal: 'g', doneWhen: 'd', deadline: new Date(Date.now() + 3600_000), channelId: 'c', channelName: 'recipes', job: 'recipe' });
+    await settle();
+    check('with shadow: false the job saves directly', vault.read('Recipes/Soup/Live Soup.md')?.includes('2 cups') === true);
+
+    vault.write('Factory/Prompts/recipe v1.md', v1.replace('status: production', 'status: retired'));
+    check('with no production prompt the built-in one is used', jobPrompt(vault, 'recipe').name === 'built-in');
+
+    // Notes from before status: given one from their outcome, nothing else changed.
+    const old = '---\noutcome: couldn\'t finish\nrequested: 2026-11-15T18:56:10-08:00\nfinished: 2026-11-15T18:57:06-08:00\nchannel: "#recipes"\ntags:\n  - squire-task\n---\n\n# Kozhi\n\n## Report\n\nbody\n';
+    vault.write('Squire/Tasks/2026-11-15 Kozhi.md', old);
+    vault.write('Squire/Tasks/2026-11-14 Kai.md', old.replace("couldn't finish", 'done'));
+    const migrated = migrateTaskNotes(vault);
+    const kozhi = vault.read('Squire/Tasks/2026-11-15 Kozhi.md')!;
+    check('old task notes get a status from their outcome', migrated.length === 2 && noteFields(kozhi).status === 'failed' && noteFields(vault.read('Squire/Tasks/2026-11-14 Kai.md')!).status === 'done', migrated.join(', '));
+    check('migration keeps every old field and the body', kozhi === old.replace('  - squire-task\n---', '  - squire-task\nstatus: failed\n---'), kozhi);
+    check('migration runs once', migrateTaskNotes(vault).length === 0);
   } finally {
     rmSync(tdir, { recursive: true, force: true });
   }
@@ -472,7 +635,7 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     places.store.data.geocodes['mission dolores'] = { lat: 37.7598, lng: -122.4271, label: 'Mission Dolores, SF' };
     const tools = new Map(placesTools(places, LA, { clock: () => nov12 }).map((h) => [h.def.name, h]));
     const find = async (args: Record<string, unknown>) =>
-      String(await tools.get('places_find')!.run({ list: '', text: '', near: '', within_km: 0, open_now: false, limit: 10, ...args }));
+      String(await tools.get('places_find')!.run({ list: '', text: '', near: '', within_miles: 0, open_now: false, limit: 10, offset: 0, exclude: [], ...args }));
     const fail = (name: string, args: Record<string, unknown>) => {
       try {
         void tools.get(name)!.run(args);
@@ -482,11 +645,20 @@ check('web search is localised to home', search.user_location?.city === 'Springf
       }
     };
 
+    const page1 = await find({ limit: 1 });
+    check('a full page says how to get the next', page1.includes('offset 1'), page1);
+    const page2 = await find({ limit: 1, offset: 1 });
+    check('offset pages on without repeating', !page2.includes(page1.split(' · ')[0]!) && page2.includes('offset 2'), page2);
+    const rest = await find({ exclude: ['tartine', 'BI-RITE'] });
+    check('exclude drops visited names', !rest.includes('Tartine') && !rest.includes('Bi-Rite') && rest.includes('Trick Dog'), rest);
+    check('offset past the end says so', (await find({ offset: 50 })).startsWith('Nothing past 50'));
+
     const dessert = await find({ list: 'des' });
     check('a list prefix picks the list', dessert.includes('Tartine') && !dessert.includes('Trick Dog'), dessert);
     check('the owner\'s note is searchable', (await find({ text: 'bun' })).startsWith('Tartine Bakery'));
-    const near = await find({ near: 'Mission Dolores', within_km: 0.4 });
+    const near = await find({ near: 'Mission Dolores', within_miles: 0.25 });
     check('near a place: nearest first, radius applied', near.split('\n')[1]?.startsWith('Bi-Rite') === true && !near.includes('Trick Dog'), near);
+    check('distances are shown in miles', / \d+\.\d mi · /.test(near) && !near.includes(' km'), near);
     const open = await find({ open_now: true });
     check('open now keeps only known-open spots and counts the unknown', open.includes('Tartine') && !open.includes('Bi-Rite') && open.includes('3 matching places left out'), open);
     check('removing a Google list entry is refused', fail('places_remove', { key: 'c1' }).includes('remove it there'));
@@ -501,11 +673,24 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     const sf = { lat: 37.7749, lng: -122.4194 };
     const fakeHit = (name: string, location: { lat: number; lng: number }) => ({ name, address: name, location, details: { placeId: name, fetchedAt: '' } });
     const withApi = places as unknown as { api?: { find: (q: string) => Promise<unknown> } };
-    withApi.api = { find: async (q) => (q.startsWith('F1rst') ? fakeHit('The F1rst Take, San Jose', { lat: 37.3382, lng: -121.8863 }) : fakeHit('Bar Shoji, New Montgomery', { lat: 37.7867, lng: -122.3998 })) };
+    withApi.api = { find: async (q) => (q.startsWith('F1rst') ? fakeHit('The F1rst Take, Salem', { lat: 37.3382, lng: -121.8863 }) : fakeHit('Bar Shoji, New Montgomery', { lat: 37.7867, lng: -122.3998 })) };
     const farMatch = await places.add('Bars', 'F1rst Take', sf).then(() => '', (err: Error) => err.message);
-    check('a match far from the area asked for is not saved', farMatch.startsWith('Not saved') && farMatch.includes('San Jose') && !places.places().some((p) => p.name.includes('F1rst')), farMatch);
+    check('a match far from the area asked for is not saved', farMatch.startsWith('Not saved') && farMatch.includes('Salem') && !places.places().some((p) => p.name.includes('F1rst')), farMatch);
     const nearMatch = await places.add('Bars', 'Shoji', sf);
     check('a match in the area asked for is saved', nearMatch.name.startsWith('Bar Shoji'));
+    // Seen in #travel, Nov 18: "check locations on each of those" had only web search, and three shops stayed unfound.
+    const lookupApi = places as unknown as { api?: { lookup: (q: string) => Promise<unknown[]> } };
+    lookupApi.api = {
+      lookup: async (q) =>
+        q.includes('nowhere')
+          ? []
+          : [{ name: 'Blue Door Harajuku Flagship', address: '1-2-3 Jingumae, Shibuya-ku, Tokyo', location: { lat: 37.5426, lng: 127.0563 }, mapsUrl: 'https://maps.google.com/?cid=1', details: { placeId: 'bluedoor', fetchedAt: '', weekdayHours: ['Monday: 12:00 – 8:00 PM'], rating: 4.6 } }],
+    };
+    const before = places.places().length;
+    const looked = String(await tools.get('places_lookup')!.run({ query: 'Blue Door flagship Tokyo', near: '' }));
+    check('places_lookup gives address, hours and link without saving', looked.includes('1-2-3 Jingumae') && looked.includes('hours: Monday: 12:00') && looked.includes('not saved') && looked.includes('cid=1') && places.places().length === before, looked);
+    const notFound = String(await tools.get('places_lookup')!.run({ query: 'nowhere shop', near: '' }));
+    check('places_lookup with no match suggests other spellings', notFound.includes('another spelling'), notFound);
     withApi.api = undefined;
     let noKey = '';
     await places.add('Dessert', 'Mitchell\'s Ice Cream', undefined).catch((err: Error) => (noKey = err.message));
@@ -521,15 +706,20 @@ check('web search is localised to home', search.user_location?.city === 'Springf
   try {
     const at = (iso: string) => new Date(iso);
     const lines: JournalLine[] = [
-      { id: '1', fromOwner: true, at: at('2026-11-12T20:00:00Z'), text: 'book Sakura Hostel in Shibuya Jun 3-8' },
+      { id: '1', fromOwner: true, at: at('2026-11-12T20:00:00Z'), text: 'book Sakura Hostel in Shibuya Apr 8-13' },
       { id: '2', fromOwner: false, at: at('2026-11-12T20:01:00Z'), text: 'Done, saved to Travel/Japan.' },
       { id: '3', fromOwner: true, at: at('2026-11-13T02:00:00Z'), text: 'riven for alex sunday' },
     ];
     const sessions = splitSessions(lines);
     check('a long gap starts a new conversation', sessions.length === 2 && sessions[0]!.length === 2, String(sessions.map((s) => s.length)));
-    const parsed = parseSummary('Japan trip bookings: Sakura Hostel Jun 3-8 booked.\nONGOING 2027-06-12: Japan trip (Tokyo, Osaka)');
-    check('an ongoing plan is read off the last line', parsed?.ongoing?.until === '2027-06-12' && parsed.summary === 'Japan trip bookings: Sakura Hostel Jun 3-8 booked.', JSON.stringify(parsed));
-    check('SKIP keeps nothing', parseSummary('SKIP') === undefined && parseSummary('  ') === undefined);
+    const parsed = parseSummary('Japan trip bookings: Sakura Hostel Apr 8-13 booked.\nONGOING 2027-04-17: Japan trip (Tokyo, Osaka)').entry;
+    check('an ongoing plan is read off the last line', parsed?.ongoing?.until === '2027-04-17' && parsed.summary === 'Japan trip bookings: Sakura Hostel Apr 8-13 booked.', JSON.stringify(parsed));
+    check('SKIP keeps nothing', parseSummary('SKIP').entry === undefined && parseSummary('  ').entry === undefined);
+    // Settled in passing in another channel: the earlier entry is told, the new entry keeps its own text.
+    const aside = parseSummary('Sneakers: picked the white pair.\nSETTLED 1ab618: vanilla in the ube muffin filling is 1/2 tsp\nONGOING 2026-12-01: sneaker order');
+    check('a SETTLED line is read off and kept out of the entry', aside.settled.length === 1 && aside.settled[0]!.id === '1ab618' && aside.settled[0]!.note.includes('1/2 tsp') && aside.entry?.summary === 'Sneakers: picked the white pair.' && aside.entry.ongoing?.until === '2026-12-01', JSON.stringify(aside));
+    const skipped = parseSummary('SKIP\nSETTLED abc123: booked the hotel');
+    check('a skipped conversation can still settle something', skipped.entry === undefined && skipped.settled[0]?.id === 'abc123', JSON.stringify(skipped));
 
     const file = join(jdir, 'journal.json');
     const journal = new Journal(file);
@@ -541,18 +731,24 @@ check('web search is localised to home', search.user_location?.city === 'Springf
       summary,
       ongoing,
     });
-    journal.done('c1', '10', entry(0, 'Japan trip: Sakura Hostel Shibuya Jun 3-8, Riverside Inn Osaka Jun 8-10.', { until: '2027-06-12', topic: 'Japan trip' }));
+    journal.done('c1', '10', entry(0, 'Japan trip: Sakura Hostel Shibuya Apr 8-13, Riverside Inn Osaka Apr 13-15.', { until: '2027-04-17', topic: 'Japan trip' }));
     for (let n = 1; n <= 8; n++) journal.done('c1', String(10 + n), entry(n, n === 1 ? 'Pickleball paddles compared: Joola Perseus.' : `Chat number ${n} about cards.`));
     const reloaded = new Journal(file);
     check('the journal and cursor survive a restart', reloaded.entries().length === 9 && reloaded.cursor('c1') === '18');
     const now = new Date('2026-11-14T12:00:00Z');
     const prompt = reloaded.prompt(LA, now);
-    check('an ongoing plan stays in the prompt past the recent few', prompt.includes('ongoing until 2027-06-12: Japan trip') && prompt.includes('Sakura'), prompt);
+    check('an ongoing plan stays in the prompt past the recent few', prompt.includes('ongoing until 2027-04-17: Japan trip') && prompt.includes('Sakura'), prompt);
     check('only the latest others are in the prompt', !prompt.includes('Pickleball') && prompt.includes('Chat number 8'), prompt);
     const related = reloaded.related('which paddle did I like', LA, now);
     check('an older conversation is found by its words', related.includes('Joola') && !related.includes('Sakura'), related);
     check('nothing related, no note', reloaded.related('https://www.instagram.com/reel/abc', LA, now) === '');
     check('a plan that has passed drops out', !reloaded.prompt(LA, new Date('2027-07-01T00:00:00Z')).includes('ongoing until'));
+    const japan = reloaded.entries().find((e) => e.ongoing)!;
+    const marked = reloaded.settle(japan.id, 'Osaka hotel booked: Riverside Inn', new Date('2026-11-16T17:20:00Z'), 'home', LA);
+    const again = reloaded.settle(japan.id, 'Osaka hotel booked: Riverside Inn', new Date('2026-11-16T17:20:00Z'), 'home', LA);
+    const settledEntry = new Journal(file).entries().find((e) => e.id === japan.id)!;
+    check('a later conversation marks an earlier entry settled, once, and it is saved', marked && !again && settledEntry.summary.endsWith('Update Mon, 16 Nov 2026 (#home): Osaka hotel booked: Riverside Inn') && settledEntry.summary.split('Update').length === 2, settledEntry.summary);
+    check('settling an unknown entry does nothing', !reloaded.settle('nope', 'x', new Date(), 'home', LA));
     const recall = String(await journalTools(reloaded, LA)[0]!.run({ query: 'Osaka hotel' }));
     check('recall searches every past conversation', recall.includes('Riverside Inn'), recall);
     const turns = withRelated([{ role: 'user', content: [{ type: 'text', text: 'what paddle again?' }] }], reloaded, LA);
@@ -564,13 +760,21 @@ check('web search is localised to home', search.user_location?.city === 'Springf
       retryable: () => false,
       async generate(_m, req) {
         summarySystem = req.system + JSON.stringify(req.turns);
-        const text = 'Japan trip: booked Sakura.\nONGOING 2027-06-12: Japan trip';
+        const text = 'Japan trip: booked Sakura.\nONGOING 2027-04-17: Japan trip';
         return { stop: 'done', text, calls: [], sources: new Sources(), turn: { role: 'assistant', text } };
       },
     };
-    const summary = await summarize(summarizer, { model: 'm', effort: 'low' }, 'travel', sessions[0]!, LA);
+    const muffins = { id: 'm1', channelId: 'r', channelName: 'recipes', from: '2026-11-16T00:00:00Z', to: '2026-11-16T00:17:00Z', summary: 'Ube muffins. Open: confirm the vanilla amount.', ongoing: { until: '2026-11-25', topic: 'ube muffins' } };
+    const summary = (await summarize(summarizer, { model: 'm', effort: 'low' }, 'travel', sessions[0]!, LA, undefined, [muffins])).entry;
+    check('the summariser sees open plans from other channels, by id', summarySystem.includes('m1 · #recipes: Ube muffins. Open: confirm the vanilla amount.'), summarySystem.slice(-300));
     check('a conversation is summarised from its transcript', summary?.ongoing?.topic === 'Japan trip' && summarySystem.includes('Owner: book Sakura') && summarySystem.includes('Squire: Done'), summarySystem.slice(-200));
     check('no web tools when none are allowed', webTools('claude-haiku-5-5', 0).length === 0);
+    // The morning brief is Squire's report: the journal is told not to carry its items as open.
+    await summarize(summarizer, { model: 'm', effort: 'low' }, 'home', [
+      { id: 'b1', fromOwner: false, brief: true, at: new Date('2026-11-17T17:35:00Z'), text: '☀️ Good morning! Still open: check the Netflix login.' },
+      { id: 'b2', fromOwner: true, at: new Date('2026-11-17T17:59:00Z'), text: 'nailed it this time, perfect' },
+    ], LA);
+    check('the journal labels the brief and is told its items are not open', summarySystem.includes('Squire (morning brief): ☀️ Good morning!') && summarySystem.includes("don't list their items as open"), summarySystem.slice(-400));
   } finally {
     rmSync(jdir, { recursive: true, force: true });
   }
@@ -646,16 +850,16 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     check('append keeps what was there', note.startsWith('---\ncreated:') && note.includes('- 1 lb pork') && note.trimEnd().endsWith('- 2 tbsp gochujang'), note);
 
     // Organising the vault: folders, moves, renames, trash.
-    await call('save_note', { title: 'Japan trip bookings', content: '- Tokyo stay booked', mode: 'create', folder: '' });
-    const moved = await call('move_note', { from: 'Squire/Inbox/Japan trip bookings.md', to: 'Travel/Japan' });
-    check('a note moved onto a new folder keeps its name', vault.read('Travel/Japan/Japan trip bookings.md')?.includes('Tokyo') === true && !vault.read('Squire/Inbox/Japan trip bookings.md'), moved);
+    await call('save_note', { title: 'Japan trip April 2027 bookings', content: '- Tokyo stay booked', mode: 'create', folder: '' });
+    const moved = await call('move_note', { from: 'Squire/Inbox/Japan trip April 2027 bookings.md', to: 'Travel/Japan' });
+    check('a note moved onto a new folder keeps its name', vault.read('Travel/Japan/Japan trip April 2027 bookings.md')?.includes('Tokyo') === true && !vault.read('Squire/Inbox/Japan trip April 2027 bookings.md'), moved);
     await call('save_note', { title: 'Osaka', content: '- to book', mode: 'create', folder: '/Travel/Japan/' });
     check('save writes into a named folder', vault.read('Travel/Japan/Osaka.md')?.includes('to book') === true);
     const tree = await call('list_notes', { folder: 'Travel' });
     check('list shows subfolders and notes', tree.startsWith('Travel/\n') && tree.includes('Travel/Japan/') && tree.includes('Travel/Japan/Osaka.md'), tree);
     await call('move_note', { from: 'Travel', to: 'Trips' });
     check('a whole folder can be renamed', vault.list('Trips').length === 2 && vault.list('Travel').length === 0);
-    check('move refuses to overwrite', (await fail('move_note', { from: 'Trips/Japan/Osaka.md', to: 'Trips/Japan/Japan trip bookings.md' })).includes('already exists'));
+    check('move refuses to overwrite', (await fail('move_note', { from: 'Trips/Japan/Osaka.md', to: 'Trips/Japan/Japan trip April 2027 bookings.md' })).includes('already exists'));
     check('move refuses to leave the vault', (await fail('move_note', { from: 'Trips/Japan/Osaka.md', to: '../Osaka.md' })).includes('".."'));
     const whole = await call('list_notes', { folder: '' });
     check('list shows the whole vault from the root, without dot-folders', whole.startsWith('the vault root\n') && whole.includes('  notes/cold brew.md') && whole.includes('  Trips/Japan/') && !whole.includes('.obsidian'), whole);
@@ -775,7 +979,7 @@ check('web search is localised to home', search.user_location?.city === 'Springf
   const desc = describeVideo({ title: 'Cookies', uploader: 'Dished', duration: 50, description: '1/3 cup sugar', chapters: [{ title: 'mix', start_time: 75 }] }, undefined, 'none available');
   check('a video reads as title, creator, description and transcript', desc.includes('Video: Cookies') && desc.includes('By: Dished') && desc.includes('Length: 0:50') && desc.includes('- 1:15 mix') && desc.includes('1/3 cup sugar') && desc.includes('no captions'), desc);
   // Seen in #misc, Nov 14: a TikTok photo post of SF places couldn't be read
-  // at all, and Harry had to screenshot every slide.
+  // at all, and the owner had to screenshot every slide.
   const ttPage = `<html><script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">${JSON.stringify({
     __DEFAULT_SCOPE__: { 'webapp.video-detail': { itemInfo: { itemStruct: { desc: '#sf cafes', author: { uniqueId: 'y3on_hwa' }, imagePost: { images: [{ imageURL: { urlList: ['https://p16.tiktokcdn-us.com/a.jpeg', 'https://p19.tiktokcdn-us.com/a.jpeg'] } }, { imageURL: { urlList: ['https://p16.tiktokcdn-us.com/b.jpeg'] } }] } } } } },
   })}</script></html>`;
@@ -795,6 +999,7 @@ check('web search is localised to home', search.user_location?.city === 'Springf
   check('a word Whisper loops on is collapsed', looped === '오늘의 요리는! 물을 끓여줍니다. 고추장 양파 고추장 [repeated]', looped);
   const real = 'add 1 tablespoon of soy sauce and 1 tablespoon of sugar';
   check('ordinary repeats are kept', cleanTranscript(real) === real && cleanTranscript('[Music] Add the flour.') === 'Add the flour.');
+  check('the video tool offers a closer look with more frames', 'more_frames' in (videoTools()[0]!.def.input_schema as { properties: object }).properties && FRAME_COUNT_CLOSE > 8);
   check('the video tool refuses Discord links', (await Promise.resolve().then(() => videoTools()[0]!.run({ url: 'https://discord.com/channels/1/2/3' })).then(() => '', (e: Error) => e.message)).includes('read_discord_messages'));
   check('nothing on the local network is opened as a video', (await readVideo('http://192.168.1.10/cam').then(() => '', (e: Error) => e.message)).includes('private'));
 }
@@ -868,19 +1073,96 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     rs.add({ text: 'Pick up dry cleaning', due: new Date('2026-11-15T20:00:00Z'), repeat: 'none', channelId: 'c' }, nineAm);
     rs.add({ text: 'Not today', due: new Date('2026-11-17T20:00:00Z'), repeat: 'none', channelId: 'c' }, nineAm);
     const bj = new Journal(join(adir, 'j.json'));
-    bj.done('c', '1', { channelId: 'c', channelName: 'travel', from: '2026-11-14T08:00:00Z', to: '2026-11-14T09:00:00Z', summary: 'Japan trip: still need to book the Osaka hotel.', ongoing: { until: '2027-06-12', topic: 'Japan trip' } });
-    const facts = await briefFacts({ timeZone: LA, reminders: rs, journal: bj, tasks: { active: () => [] } as never }, nineAm);
-    check('brief: facts carry today, reminders and open plans', facts.includes('Sunday, November 15') && facts.includes('Pick up dry cleaning') && !facts.includes('Not today') && facts.includes('Osaka hotel') && !facts.includes('work-city forecast'), facts);
-    const monday = await briefFacts({ timeZone: LA, reminders: rs, journal: bj, tasks: { active: () => [] } as never }, new Date('2026-11-16T17:00:00Z'));
+    bj.done('c', '1', { channelId: 'c', channelName: 'travel', from: '2026-11-14T08:00:00Z', to: '2026-11-14T09:00:00Z', summary: 'Japan trip: still need to book the Osaka hotel.', ongoing: { until: '2027-04-17', topic: 'Japan trip' } });
+    const facts = await briefFacts({ timeZone: LA, reminders: rs, journal: bj }, nineAm);
+    check('brief: facts carry today, reminders and open plans', facts.includes('Sunday, November 15') && facts.includes('Pick up dry cleaning') && facts.includes('Osaka hotel'), facts);
+    const todayBlock = facts.split('\n\n').find((p) => p.startsWith('Reminders today'))!;
+    const laterBlock = facts.split('\n\n').find((p) => p.startsWith('Reminders already set for later days')) ?? '';
+    check("brief: a later reminder isn't today's, but marks what it covers as handled", !todayBlock.includes('Not today') && laterBlock.includes('Not today'), facts);
+    check('brief: no background tasks in the facts', !/background tasks:/i.test(facts), facts);
+    check('brief: on a weekend the weather is Springfield only', briefWeatherPlaces(nineAm, LA).join('|') === 'Springfield, OR');
+    const monday = await briefFacts({ timeZone: LA, reminders: rs, journal: bj }, new Date('2026-11-16T17:00:00Z'));
     const handoff = dropMissingNotes('* Hand off to @alex at the card shop (time not set yet): purple Riven AA\n* the card shop handoff to @alex today, no time set: red Pyke AA\n* Dinner — time TBD.\n* No time set? Fine.');
     check('brief: notes about missing details are taken out', handoff === '* Hand off to @alex at the card shop: purple Riven AA\n* the card shop handoff to @alex today: red Pyke AA\n* Dinner.\n* No time set? Fine.', handoff);
+    // The 17 Nov brief pasted a three-day forecast and a note about reading the page.
+    const pasted = dropWeatherJunk(
+      '☀️ Good morning! Springfield is forecast for a high of 61° and a low of 52° today. Springfield, OR Sun 11/15 66° 51°; Mon 11/16 59° 43°; Tue 11/17 61° 52° (reading inferred from the layout)\nIn downtown Portland, breaks of sun are expected, with a high of 61° and a low of 46°.\n\n**Inbox**\n* [main] UPS: due 11/17 between 11 AM and 1 PM.',
+    );
+    check(
+      'brief: a pasted multi-day forecast is taken out of the weather, not the rest',
+      pasted === '☀️ Good morning! Springfield is forecast for a high of 61° and a low of 52° today.\nIn downtown Portland, breaks of sun are expected, with a high of 61° and a low of 46°.\n\n**Inbox**\n* [main] UPS: due 11/17 between 11 AM and 1 PM.',
+      pasted,
+    );
     const mailbox = (name: string) =>
       ({ name, api: async (url: string) => (url.endsWith('/messages') ? { messages: [{ id: 'm' }] } : url.includes('/messages/') ? { id: 'm', snippet: `${name} bill due`, payload: { mimeType: 'text/plain', headers: [], body: { data: Buffer.from(`${name}: payment due on Nov 20`).toString('base64url') } } } : { items: [] }) }) as never;
     const workBox = mailbox('work');
     const mainBox = { ...(mailbox('main') as object), extraMail: [workBox], mailboxes: () => [mainBox, workBox] } as never;
-    const twoInboxes = await briefFacts({ timeZone: LA, reminders: rs, journal: bj, tasks: { active: () => [] } as never, google: mainBox }, nineAm);
+    const twoInboxes = await briefFacts({ timeZone: LA, reminders: rs, journal: bj, google: mainBox }, nineAm);
     check('brief: every Gmail account gets its own inbox facts, with the email text', twoInboxes.includes('Inbox (main account)') && twoInboxes.includes('Inbox (work account)') && twoInboxes.includes('work: payment due on Nov 20'), twoInboxes);
-    check('brief: on a weekday it asks for the work-city forecast', monday.includes('work-city forecast'), monday);
+    check('brief: on a weekday the weather is Springfield and Portland by 100 Main St', briefWeatherPlaces(new Date('2026-11-16T17:00:00Z'), LA).join('|') === 'Springfield, OR|Portland, OR 97204 (around 100 Main St)' && monday.includes('Monday, November 16'), monday);
+    // Friday 11:30 PM in LA is already Saturday in UTC; the day is the owner's, not the server's.
+    check('brief: weekdays are counted in the owner\'s time zone', briefWeatherPlaces(new Date('2026-11-21T07:30:00Z'), LA).length === 2 && briefWeatherPlaces(new Date('2026-11-22T07:30:00Z'), LA).length === 1);
+    // Each place's weather is its own small search; only its final sentence reaches the brief, which doesn't search.
+    const briefReqs: { text: string; maxUses: number }[] = [];
+    const briefLlm: LLM = {
+      retryable: () => false,
+      async generate(_m, req) {
+        const text = JSON.stringify(req.turns);
+        briefReqs.push({ text, maxUses: req.web.maxUses });
+        const resumed = req.turns.some((t) => t.role === 'assistant');
+        if (req.web.maxUses === 0) return { stop: 'done', text: 'BRIEF', calls: [], sources: new Sources(), turn: { role: 'assistant', text: 'BRIEF' } };
+        if (text.includes('Springfield') && !resumed) return { stop: 'pause', text: 'notes', calls: [], sources: new Sources(), turn: { role: 'assistant', text: 'notes' } };
+        if (resumed) return { stop: 'done', text: 'Springfield, OR Sun 11/15 66° 51°; Mon 11/16 59° 43°\nSunny in Springfield today, high 61°, low 52°.', finalText: 'Sunny in Springfield today, high 61°, low 52°.', calls: [], sources: new Sources(), turn: { role: 'assistant', text: '' } };
+        return { stop: 'done', text: 'NONE', calls: [], sources: new Sources(), turn: { role: 'assistant', text: 'NONE' } };
+      },
+    };
+    const written = await writeBrief(briefLlm, { model: 'm', effort: 'low' }, monday, undefined, briefWeatherPlaces(new Date('2026-11-16T17:00:00Z'), LA));
+    const final = briefReqs.find((r) => r.maxUses === 0)!;
+    check('brief: weather is looked up per place (100 Main St, then all of Portland), then the brief is written without searching', briefReqs.filter((r) => r.maxUses === 0).length === 1 && briefReqs.filter((r) => r.maxUses > 0).length === 4 && briefReqs.some((r) => r.maxUses > 0 && r.text.includes('Place: Portland, OR.')), JSON.stringify(briefReqs.map((r) => r.maxUses)));
+    check('brief: the weather goes on top in code, only the final sentence, and NONE is left out', written.text === 'Good morning! Sunny in Springfield today, high 61°, low 52°.\n\nBRIEF' && !final.text.includes('Sunny'), written.text);
+    check('brief: a place with no weather is reported for the activity log', written.missed.join('|') === 'Portland, OR 97204 (around 100 Main St)', written.missed.join('|'));
+    const sfLlm: LLM = {
+      retryable: () => false,
+      async generate(_m, req) {
+        const text = JSON.stringify(req.turns);
+        const say = (t: string) => ({ stop: 'done' as const, text: t, calls: [], sources: new Sources(), turn: { role: 'assistant' as const, text: t } });
+        if (req.web.maxUses === 0) return say('**Today**\n* Dinner');
+        if (text.includes('Springfield')) return say('Rainy in Springfield today, high 58°, low 51°, with a 100% chance of rain.');
+        if (text.includes('97204')) return say('NONE');
+        return say('Rainy in Portland today, high 57°, low 50°, with a 90% chance of rain.');
+      },
+    };
+    const sf = await writeBrief(sfLlm, { model: 'm', effort: 'low' }, monday, undefined, briefWeatherPlaces(new Date('2026-11-18T18:30:00Z'), LA));
+    check('brief: when 97204 has no forecast, Portland\'s is used, on its own line under the greeting', sf.text === 'Good morning! Rainy in Springfield today, high 58°, low 51°, with a 100% chance of rain.\nRainy in Portland today, high 57°, low 50°, with a 90% chance of rain.\n\n**Today**\n* Dinner' && sf.missed.length === 0, sf.text);
+    check('brief: with no weather it just greets', briefGreeting([]) === 'Good morning!');
+
+    // Items the owner drops stay out of later briefs, and survive a restart.
+    const dropState = new BriefState(join(adir, 'drop.json'));
+    const [dropTool, undropTool] = briefTools(dropState);
+    await dropTool!.run({ item: 'Check the Netflix login from Mon 16 Nov' });
+    await dropTool!.run({ item: 'check the netflix login from mon 16 nov' });
+    const reloaded = new BriefState(join(adir, 'drop.json'));
+    check('brief: a dropped item is kept once, after a restart too', reloaded.dropped().length === 1 && reloaded.dropped()[0]!.text === 'check the netflix login from mon 16 nov', JSON.stringify(reloaded.dropped()));
+    const withDrops = await briefFacts({ timeZone: LA, reminders: rs, journal: bj, state: reloaded }, nineAm);
+    check('brief: the facts carry the dropped list', withDrops.includes('dropped these from the brief') && withDrops.includes('netflix login'), withDrops);
+    check('brief: drops expire after 90 days', reloaded.dropped(new Date(Date.now() + 91 * 86_400_000)).length === 0);
+    check('brief: undrop lets it back in', String(await undropTool!.run({ item: 'Netflix' })).includes('can show') && dropState.dropped().length === 0 && new BriefState(join(adir, 'drop.json')).dropped().length === 0);
+    check('brief: the chat prompt tells it to drop items the owner waves off', BRIEF_PROMPT.includes('drop_brief_item'));
+    check('brief: its posts are marked for the journal', isBrief('☀️ Good morning!') && !isBrief('Good morning'));
+
+    // Tickets: filed against one message, read fresh from disk, closed by the review.
+    const tfile = join(adir, 'tickets.json');
+    const ticketsA = new TicketStore(tfile);
+    const ticketsB = new TicketStore(tfile);
+    const filed = ticketsA.add({ note: 'Work-city weather missing', messageId: '42', channelId: '7', channelName: 'home', link: 'https://discord.com/channels/1/7/42', author: 'Squire', postedAt: '2026-11-18T18:37:00Z', text: 'x'.repeat(5000), replyTo: { messageId: '41', text: 'brief?' } });
+    ticketsB.add({ note: 'second', messageId: '43', channelId: '7', channelName: 'home', link: 'l', author: 'Squire', postedAt: '2026-11-18T18:38:00Z', text: 'y' });
+    check('tickets: two stores on one file keep both, and long messages are cut', ticketsA.list().length === 2 && ticketsA.list()[0]!.text.length === 3000, String(ticketsA.list().length));
+    ticketsB.close(filed.id, 'PR #54');
+    check('tickets: a closed one leaves the open list, with its resolution', ticketsA.list('open').length === 1 && ticketsA.list('closed')[0]!.resolution === 'PR #54');
+    check('tickets: an empty note is refused', (() => { try { ticketsA.add({ note: ' ', messageId: '1', channelId: '1', channelName: 'x', link: 'l', author: 'Squire', postedAt: '', text: '' }); return false; } catch { return true; } })());
+    const td = ticketDigest(ticketsA.list(), LA);
+    check('tickets: the digest gives the note, the ask and the message, with how to close', td.includes('2 open') && td.includes("Owner's note: Work-city weather missing") && td.includes('In reply to (message 41): brief?') && td.includes('npm run tickets -- close'), td.slice(0, 600));
+    check('tickets: a link or a bare ID points at a message', JSON.stringify(ticketTarget('https://discord.com/channels/1/7/42', '9')) === '{"channelId":"7","messageId":"42"}' && JSON.stringify(ticketTarget('1440123456789012345', '9')) === '{"channelId":"9","messageId":"1440123456789012345"}' && !ticketTarget('https://discord.com/channels/1/7', '9') && !ticketTarget('hello', '9'));
 
     // A reply's trace: calls, tools and usage add up across rounds.
     const replies = [
@@ -905,9 +1187,64 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     check('agent: an unsaved "from now on" is sent back to be saved', promiseMem.list().some((m) => m.text === 'Prefers aisle seats') && promised.startsWith('Got it, aisle') && seen.some((t) => t.includes('saved nothing to memory')), `${promised} | ${seen.join(' / ')}`);
     const plain = [reply('Sure, here are three cafes.')];
     const quiet = new Agent({ llm: { retryable: () => false, generate: async () => plain.shift()! }, model: 'claude-haiku-5-5', effort: 'low', timeZone: LA, reminders: rs, memory: promiseMem } as never);
+    // Seen in #travel, Nov 18: shop addresses looked up, left in chat, "want me to add them to the note?"
+    const noteVault = new Vault(join(adir, 'vault'));
+    const noteCall = { id: 'n', name: 'save_note', input: { title: 'Japan trip tips', folder: 'Travel/Japan', content: '- Pottery: 4-5-6 Jingumae', mode: 'append', sources: [] } };
+    const offered = [reply('Pottery is at 4-5-6 Jingumae. Want me to add these addresses to the note?'), { stop: 'tool_use' as const, text: '', calls: [noteCall], sources: new Sources(), turn: { role: 'assistant' as const, text: '', calls: [noteCall] } }, reply('Pottery is at 4-5-6 Jingumae; the note is updated.')];
+    const offerSeen: string[] = [];
+    const offerer = new Agent({
+      llm: { retryable: () => false, generate: async (_m: unknown, req: { turns: unknown[] }) => (offerSeen.push(JSON.stringify(req.turns.at(-1))), offered.shift()!) },
+      model: 'claude-haiku-5-5', effort: 'low', timeZone: LA, reminders: rs, vault: noteVault,
+    } as never);
+    const offerReply = await offerer.reply([{ role: 'user', content: [{ type: 'text', text: 'check locations on each of those' }] }], { channelId: 'c', channelName: 'travel' });
+    check('agent: an offer to add looked-up details to a note is sent back to save them', offerReply.endsWith('the note is updated.') && offerSeen.some((t) => t.includes('instead of saving them')), `${offerReply} | ${offerSeen.join(' / ')}`);
+    check('agent: offers to save to a note are recognised, other offers are not', offersToSaveToNote('Want me to put the hours in the Japan trip tips note too?') && offersToSaveToNote("Addresses aren't in the note yet.") && !offersToSaveToNote('Want me to set a reminder?') && !offersToSaveToNote("I can't open that note."));
     check('agent: an ordinary reply is not sent back', (await quiet.reply([{ role: 'user', content: [{ type: 'text', text: 'cafes?' }] }], { channelId: 'c', channelName: 'misc' })).startsWith('Sure'));
   } finally {
     rmSync(adir, { recursive: true, force: true });
+  }
+}
+
+// Catching up on messages sent while the bot was down.
+{
+  const cdir = mkdtempSync(join(tmpdir(), 'squire-catchup-'));
+  try {
+    const seen = new LastSeen(join(cdir, 'data', 'last-seen.json'));
+    check('catch-up: no heartbeat on record reads as undefined', seen.read() === undefined);
+    const up = new Date('2026-11-21T06:00:00Z');
+    seen.touch(up);
+    check('catch-up: the heartbeat is kept between starts', seen.read()?.toISOString() === up.toISOString());
+
+    const started = new Date('2026-11-21T15:00:00Z');
+    const since = catchUpSince(up, started);
+    check('catch-up: the window opens a little before the last heartbeat', since.getTime() === up.getTime() - CATCH_UP_GRACE_MS);
+    check('catch-up: with no heartbeat, the window is the last 12 hours', catchUpSince(undefined, started).getTime() === started.getTime() - 12 * 3600_000);
+
+    const at = (iso: string) => new Date(`2026-11-21T${iso}:00Z`);
+    const line = (id: string, authorId: string, time: string, content: string, replyToId?: string): ChatLine => ({ id, authorId, createdAt: at(time), content, attachments: [], ...(replyToId ? { replyToId } : {}) });
+    const ids = { botId: 'bot', userId: 'me', since, startedAt: started };
+    const channel = [
+      line('1', 'me', '05:00', 'old question'),
+      line('2', 'bot', '05:01', 'old answer', '1'),
+      line('3', 'me', '05:55', 'asked just before the PC slept'),
+      line('4', 'me', '09:00', 'what time is my flight?'),
+      line('5', 'me', '12:30', 'also add milk to the list'),
+      line('6', 'me', '15:00', 'sent as the bot came up'),
+    ];
+    const missed = missedMessages(channel, ids);
+    check('catch-up: every unanswered message from the outage is picked up, oldest first', missed.map((l) => l.id).join(',') === '3,4,5', missed.map((l) => l.id).join(','));
+    check('catch-up: nothing is missed once the bot has replied after them', missedMessages([...channel.slice(0, 5), line('7', 'bot', '13:00', 'Flight is at 6.')], ids).length === 0);
+    check('catch-up: an owner message from before the last heartbeat is not dug up', missedMessages([line('1', 'me', '04:00', 'never answered, long ago')], ids).length === 0);
+    check('catch-up: the reply is labelled in code', catchUpHeader(3) === '-# Catching up on 3 messages sent while I was offline' && catchUpHeader(1).includes('a message'));
+    const note = catchUpNote(3, up, started, LA);
+    check('catch-up: the note asks for every message in one reply, apart from the brief', /last 3 messages/.test(note) && /single reply/.test(note) && /not the morning brief/.test(note), note);
+
+    // The note reaches the model on the newest missed message.
+    const turns = buildConversation(channel.slice(0, 5).map((l) => (l.id === '5' ? { ...l, notes: [note] } : l)), { botId: 'bot', userId: 'me', channelName: 'misc', timeZone: LA, maxAgeMs: 24 * 3600_000 });
+    const lastText = JSON.stringify(turns.at(-1));
+    check('catch-up: the missed messages and the note are in the final turn', lastText.includes('what time is my flight?') && lastText.includes('add milk') && lastText.includes('single reply'), lastText);
+  } finally {
+    rmSync(cdir, { recursive: true, force: true });
   }
 }
 

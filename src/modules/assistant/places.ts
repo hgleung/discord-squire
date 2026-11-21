@@ -198,6 +198,8 @@ export function mapsLink(cid: string | undefined, name: string, address?: string
 /** How far from the area asked for an added place's match can be before it's taken for a namesake elsewhere. */
 export const MAX_ADD_KM = 20;
 
+export const KM_PER_MILE = 1.609344;
+
 export function distanceKm(a: LatLng, b: LatLng): number {
   const rad = (d: number) => (d * Math.PI) / 180;
   const h = Math.sin(rad(b.lat - a.lat) / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(rad(b.lng - a.lng) / 2) ** 2;
@@ -288,34 +290,46 @@ export class PlacesApi {
    * `near` is the place's own coordinates (a synced list entry), so only a match
    * right there counts; otherwise `near` is just the area to search around.
    */
-  async find(
-    query: string,
-    near?: LatLng,
-    exact = false,
-  ): Promise<{ name: string; address?: string; location?: LatLng; mapsUrl?: string; details: PlaceDetails } | undefined> {
+  async find(query: string, near?: LatLng, exact = false): Promise<FoundPlace | undefined> {
     const hits = await this.search(query, DETAIL_FIELDS, near, near && exact ? 300 : 50_000);
     // A saved spot's coordinates are exact: anything far from them is a different branch or business.
     const hit = hits.find((h) => !exact || !near || !h.location || distanceKm(near, { lat: h.location.latitude, lng: h.location.longitude }) < 0.5);
-    if (!hit) return undefined;
-    return {
-      name: hit.displayName?.text ?? query,
-      address: hit.formattedAddress,
-      location: hit.location ? { lat: hit.location.latitude, lng: hit.location.longitude } : undefined,
-      mapsUrl: hit.googleMapsUri,
-      details: {
-        placeId: hit.id,
-        timeZone: hit.timeZone?.id,
-        periods: hit.regularOpeningHours?.periods,
-        weekdayHours: hit.regularOpeningHours?.weekdayDescriptions,
-        rating: hit.rating,
-        priceLevel: hit.priceLevel,
-        status: hit.businessStatus,
-        type: hit.primaryTypeDisplayName?.text,
-        website: hit.websiteUri,
-        fetchedAt: new Date().toISOString(),
-      },
-    };
+    return hit ? found(hit, query) : undefined;
   }
+
+  /** Google's top matches for a place, with details, for looking one up without saving it. */
+  async lookup(query: string, near?: LatLng): Promise<FoundPlace[]> {
+    return (await this.search(query, DETAIL_FIELDS, near, 50_000)).map((h) => found(h, query));
+  }
+}
+
+export interface FoundPlace {
+  name: string;
+  address?: string;
+  location?: LatLng;
+  mapsUrl?: string;
+  details: PlaceDetails;
+}
+
+function found(hit: ApiPlace, query: string): FoundPlace {
+  return {
+    name: hit.displayName?.text ?? query,
+    address: hit.formattedAddress,
+    location: hit.location ? { lat: hit.location.latitude, lng: hit.location.longitude } : undefined,
+    mapsUrl: hit.googleMapsUri,
+    details: {
+      placeId: hit.id,
+      timeZone: hit.timeZone?.id,
+      periods: hit.regularOpeningHours?.periods,
+      weekdayHours: hit.regularOpeningHours?.weekdayDescriptions,
+      rating: hit.rating,
+      priceLevel: hit.priceLevel,
+      status: hit.businessStatus,
+      type: hit.primaryTypeDisplayName?.text,
+      website: hit.websiteUri,
+      fetchedAt: new Date().toISOString(),
+    },
+  };
 }
 
 // --- keeping the lists current ---
@@ -333,7 +347,7 @@ export interface SavedPlacesOptions {
 /** Most Places lookups one sync may make, so a big new list can't run up a bill in one go. */
 const LOOKUPS_PER_SYNC = 150;
 
-/** "Voyager Craft Coffee" and "Voyager Craft Coffee - Santa Clara" are the same spot. */
+/** "Corner Cafe" and "Corner Cafe - Salem" are the same spot. */
 function sameName(a: string, b: string): boolean {
   const x = a.toLowerCase().trim();
   const y = b.toLowerCase().trim();
@@ -486,7 +500,7 @@ export class SavedPlaces {
     const off = near && hit.location ? distanceKm(near, hit.location) : 0;
     if (off > MAX_ADD_KM) {
       throw new Error(
-        `Not saved: Google's best match for "${query}" is ${hit.name}, ${hit.address ?? 'no address'}, ${Math.round(off)} km from the area searched, so it's probably a different place. ` +
+        `Not saved: Google's best match for "${query}" is ${hit.name}, ${hit.address ?? 'no address'}, ${Math.round(off / KM_PER_MILE)} miles from the area searched, so it's probably a different place. ` +
           'Search again with the street address from the post as the query, or a fuller name. If that really is the place, search again with near set to its own area.',
       );
     }
@@ -511,6 +525,12 @@ export class SavedPlaces {
     this.store.data.places.push(place);
     this.store.save();
     return place;
+  }
+
+  /** Looks a place up on Google without saving it: up to three matches near an area. */
+  async lookup(query: string, near?: LatLng): Promise<FoundPlace[]> {
+    if (!this.api) throw new Error('Looking up a place needs GOOGLE_MAPS_API_KEY; search the web instead.');
+    return this.api.lookup(query, near ?? (await this.home()));
   }
 
   remove(key: string): SavedPlace {

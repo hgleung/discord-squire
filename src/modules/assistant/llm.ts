@@ -125,6 +125,12 @@ export interface Generation {
   stop: StopReason;
   /** The visible text of this turn. */
   text: string;
+  /**
+   * Only the text written after the turn's last web search or fetch: the
+   * answer, without notes the model wrote between searches. Same as text
+   * when nothing was searched.
+   */
+  finalText?: string;
   calls: ToolCall[];
   sources: Sources;
   /** What to append to the conversation before calling again. */

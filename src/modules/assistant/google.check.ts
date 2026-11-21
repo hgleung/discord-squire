@@ -97,11 +97,31 @@ check('one account: no account argument', !('account' in ((googleTools(stub, 'Am
 
 // --- calendar time zones ---
 // A Tokyo check-in at 4 PM is midnight in California; it should read as 16:00.
-const tokyo = { id: 'e1', start: { dateTime: '2027-06-08T07:00:00Z', timeZone: 'Asia/Tokyo' }, end: { dateTime: '2027-06-10T02:00:00Z', timeZone: 'Asia/Tokyo' } };
+const tokyo = { id: 'e1', start: { dateTime: '2027-04-13T07:00:00Z', timeZone: 'Asia/Tokyo' }, end: { dateTime: '2027-04-15T02:00:00Z', timeZone: 'Asia/Tokyo' } };
 const tokyoWhen = when(tokyo, 'America/Los_Angeles');
-check('event in another zone shows its own local time', tokyoWhen.includes('8 Jun, 16:00') && tokyoWhen.includes('10 Jun, 11:00') && tokyoWhen.endsWith('Asia/Tokyo time'), tokyoWhen);
+check('event in another zone shows its own local time', tokyoWhen.includes('13 Apr, 16:00') && tokyoWhen.includes('15 Apr, 11:00') && tokyoWhen.endsWith('Asia/Tokyo time'), tokyoWhen);
 const home = when({ id: 'e2', start: { dateTime: '2027-06-08T07:00:00Z', timeZone: 'America/Los_Angeles' }, end: { dateTime: '2027-06-08T08:00:00Z' } }, 'America/Los_Angeles');
 check('event in the owner zone has no zone label', home === 'Tue 8 Jun, 00:00 – Tue 8 Jun, 01:00', home);
+// Seen in #travel, Nov 18: Sakura booked Apr 8-13 showed as "Apr 8 to Apr 12",
+// and the trip summary called it a different end date from the booking.
+const stay = when({ id: 'e3', start: { date: '2027-04-08' }, end: { date: '2027-04-13' } }, 'America/Los_Angeles');
+check('a multi-day all-day stay names its checkout day', stay.startsWith('2027-04-08 to 2027-04-12') && stay.includes('ends 2027-04-13'), stay);
+check('a one-day all-day event is just its date', when({ id: 'e4', start: { date: '2027-04-16' }, end: { date: '2027-04-17' } }, 'America/Los_Angeles') === '2027-04-16 (all day)');
+// The same summary read UA 837's 16:50 Tokyo departure as 00:50, a "conflict" with the plan.
+const flightAccount = {
+  name: 'main',
+  extraMail: [],
+  mailboxes() {
+    return [this];
+  },
+  api: async (url: string) =>
+    url.includes('calendarList')
+      ? { items: [{ id: 'primary', summary: 'Main' }] }
+      : { items: [{ id: 'ua837', summary: 'Flight home (UA 837)', start: { dateTime: '2027-04-17T07:50:00Z' }, end: { dateTime: '2027-04-17T18:35:00Z' } }] },
+} as unknown as GoogleAccount;
+const flightLines = String(await googleTools(flightAccount, 'America/Los_Angeles', { readOnly: true }).find((t) => t.def.name === 'calendar_events')!.run({ from: '2027-04-01T00:00:00Z', to: '2027-04-20T00:00:00Z', query: '' }));
+check('a time in the owner zone comes with the note to convert it abroad', flightLines.includes('00:50') && flightLines.includes('convert to local time there'), flightLines);
+check('only events in another zone skip the note', !String(await googleTools({ ...flightAccount, api: async (url: string) => (url.includes('calendarList') ? { items: [{ id: 'primary' }] } : { items: [tokyo] }) } as unknown as GoogleAccount, 'America/Los_Angeles', { readOnly: true })[0]!.run({ from: '', to: '', query: '' })).includes('convert to local'));
 
 const sent: Record<string, unknown>[] = [];
 const recorder = {
@@ -116,11 +136,11 @@ const recorder = {
   },
 } as unknown as GoogleAccount;
 const create = googleTools(recorder, 'America/Los_Angeles', { readOnly: false }).find((t) => t.def.name === 'calendar_create_event')!;
-const createArgs = { calendar_id: '', summary: 'Riverside Inn', start: '2027-06-08T16:00:00+09:00', end: '2027-06-10T11:00:00+09:00', all_day: false, location: '', description: '' };
+const createArgs = { calendar_id: '', summary: 'Riverside Inn', start: '2027-04-13T16:00:00+09:00', end: '2027-04-15T11:00:00+09:00', all_day: false, location: '', description: '' };
 const created = String(await create.run({ ...createArgs, time_zone: 'Asia/Tokyo' }));
 const sentStart = sent.at(-1)?.start as { timeZone?: string } | undefined;
 check('create keeps the zone it is given', sentStart?.timeZone === 'Asia/Tokyo', JSON.stringify(sentStart));
-check('create reports times in that zone', created.includes('8 Jun, 16:00'), created);
+check('create reports times in that zone', created.includes('13 Apr, 16:00'), created);
 await create.run({ ...createArgs, time_zone: '' });
 check('create defaults to the owner zone', (sent.at(-1)?.start as { timeZone?: string }).timeZone === 'America/Los_Angeles');
 let badZone = false;

@@ -2,8 +2,11 @@ import type {
   AutocompleteInteraction,
   ChatInputCommandInteraction,
   Client,
+  ContextMenuCommandBuilder,
   GatewayIntentBits,
   Message,
+  MessageContextMenuCommandInteraction,
+  ModalSubmitInteraction,
   SlashCommandBuilder,
   SlashCommandOptionsOnlyBuilder,
   SlashCommandSubcommandsOnlyBuilder,
@@ -28,6 +31,18 @@ export interface Command {
   public?: boolean;
 }
 
+/** A command in a message's Apps menu (right-click or long-press). Owner-only. */
+export interface MessageMenu {
+  data: ContextMenuCommandBuilder;
+  run(interaction: MessageContextMenuCommandInteraction): Promise<void>;
+}
+
+/** Handles submitted modals whose custom id starts with `prefix:`. Owner-only. */
+export interface ModalHandler {
+  prefix: string;
+  run(interaction: ModalSubmitInteraction): Promise<void>;
+}
+
 /**
  * A feature of the bot — a directory under src/modules that owns some
  * commands and whatever state they need. The bot registers every module's
@@ -36,6 +51,10 @@ export interface Command {
 export interface BotModule {
   name: string;
   commands: Command[];
+  /** Commands in a message's Apps menu. */
+  messageMenus?: MessageMenu[];
+  /** Modals this module shows, by custom id prefix. */
+  modals?: ModalHandler[];
   /** Printed at startup, e.g. which file or model the module is using. */
   describe?(): string[];
   /**

@@ -16,7 +16,7 @@ import { toLocalIso } from './time.js';
  * can add up spending.
  */
 
-export type ActivityKind = 'reply' | 'task' | 'journal' | 'brief' | 'update';
+export type ActivityKind = 'reply' | 'task' | 'journal' | 'brief' | 'update' | 'style' | 'job';
 
 export interface ActivityEvent {
   /** UTC ISO. */
@@ -35,6 +35,8 @@ export interface ActivityEvent {
   /** task: its title and id. */
   title?: string;
   taskId?: string;
+  /** The factory job this was a run of (recipe, brief, vault-health...), for per-job spend. */
+  job?: string;
   error?: string;
   ms?: number;
   /** API calls made. */

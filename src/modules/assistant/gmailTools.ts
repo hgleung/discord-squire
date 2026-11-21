@@ -158,13 +158,25 @@ export async function searchMail(account: GoogleAccount, timeZone: string, query
  * whitespace squeezed and cut at `cap` characters.
  */
 export async function mailWithBodies(account: GoogleAccount, timeZone: string, query: string, max: number, cap: number): Promise<string[]> {
+  return (await mailItems(account, timeZone, query, max, cap)).map((m) => m.text);
+}
+
+/** The same, with each message's id and subject kept apart, for code that has to remember which emails it has handled. */
+export async function mailItems(
+  account: GoogleAccount,
+  timeZone: string,
+  query: string,
+  max: number,
+  cap: number,
+): Promise<{ id: string; subject: string; text: string }[]> {
   const list = await account.api<{ messages?: { id: string }[] }>(`${GMAIL}/messages`, { params: { q: query, maxResults: max } });
   const msgs = await Promise.all((list.messages ?? []).map((m) => account.api<Message>(`${GMAIL}/messages/${m.id}`, { params: { format: 'full' } })));
   return msgs.map((m) => {
     const date = m.internalDate ? toLocalShort(new Date(Number(m.internalDate)), timeZone) : header(m.payload, 'Date');
     const text = messageText(m.payload).text.replace(/\s+/g, ' ').trim() || m.snippet || '';
     const body = text.length > cap ? `${text.slice(0, cap)} […]` : text;
-    return `${date} · ${header(m.payload, 'From')} · ${header(m.payload, 'Subject') || '(no subject)'}\n  ${body}`;
+    const subject = header(m.payload, 'Subject') || '(no subject)';
+    return { id: m.id, subject, text: `${date} · ${header(m.payload, 'From')} · ${subject}\n  ${body}` };
   });
 }
 

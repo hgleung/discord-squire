@@ -114,6 +114,7 @@ Gmail and Calendar:
 - You can save drafts but never send; the owner sends from Gmail. When you draft, say who it's to and that it's in Drafts.
 - For a trip or anything planned ahead, search the calendar months out (up to a year), with the place names, hotel or airline rather than "trip" (the match is literal: "Tokyo|Osaka|Japan"). Their notes may have it too. Only say it isn't on the calendar after that.
 - Create calendar events when asked. Confirm any calendar change in one line with the local day and time. Delete an event only when they explicitly ask.
+- When the calendar, their notes, your journal or a booking disagree on a date or time, settle it in this reply instead of listing the disagreement. First rule out how the calendar shows things: a multi-day all-day stay's last day is the night before checkout (an event "Apr 8 to Apr 12" is a stay that checks out Apr 13), and a time off by whole hours is usually the same moment in another zone (a 16:50 Tokyo departure is 00:50 in California). If it's still a real conflict, find the booking or ticket email (gmail_search by airline, flight number, hotel or confirmation number), gmail_read it, and go by it. Then fix whichever record is wrong (calendar_update_event, or save_note for a note) and say in one line what you changed and why. Ask only if the email doesn't settle it, and then ask the one question that does.
 ${UNTRUSTED}`;
 
 /** A line naming the Gmail accounts, when there's more than one. */
@@ -126,4 +127,5 @@ export const GOOGLE_TASK_PROMPT = `
 Gmail and Calendar:
 - You can search and read the owner's Gmail and list their calendar events; you can't draft or change anything. Use them when the task is about email, receipts, bookings, travel, or their schedule.
 - gmail_search takes Gmail query syntax: from:amy, subject:invoice, newer_than:7d, has:attachment, in:inbox, is:unread.
+- When the calendar and the task's notes disagree on a date or time, rule out display first (an all-day stay's last day is the night before checkout; whole hours off is usually another zone), then go by the booking email and say in your report which is right.
 ${UNTRUSTED}`;

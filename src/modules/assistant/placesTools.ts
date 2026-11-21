@@ -1,7 +1,7 @@
 import type { ToolHandler } from './llm.js';
 import type { GoogleAccount } from './google.js';
 import { listEvents } from './calendarTools.js';
-import { distanceKm, isOpenAt, todaysHours, type LatLng, type SavedPlace, type SavedPlaces } from './places.js';
+import { distanceKm, KM_PER_MILE, isOpenAt, todaysHours, type FoundPlace, type LatLng, type SavedPlace, type SavedPlaces } from './places.js';
 import { toLocalIso, toLocalShort } from './time.js';
 
 const PRICE: Record<string, string> = {
@@ -19,7 +19,7 @@ function describe(p: SavedPlace, at: Date, from?: LatLng): string {
   return [
     p.name,
     p.list,
-    from && p.location ? `${distanceKm(from, p.location).toFixed(1)} km` : undefined,
+    from && p.location ? `${(distanceKm(from, p.location) / KM_PER_MILE).toFixed(1)} mi` : undefined,
     p.details?.status && p.details.status !== 'OPERATIONAL' ? p.details.status.toLowerCase().replace(/_/g, ' ') : undefined,
     open === undefined ? 'hours unknown' : `${open ? 'open now' : 'closed now'}${hours ? ` (today ${hours})` : ''}`,
     p.details?.rating ? `★${p.details.rating}` : undefined,
@@ -34,6 +34,13 @@ function describe(p: SavedPlace, at: Date, from?: LatLng): string {
     .join(' · ');
 }
 
+/** A looked-up place: the saved-place line, plus the week's hours so they can be written down. */
+export function lookedUp(h: FoundPlace, at: Date, from?: LatLng): string {
+  const line = describe({ key: '', list: 'not saved', name: h.name, address: h.address, location: h.location, mapsUrl: h.mapsUrl, source: 'list', details: h.details }, at, from);
+  const week = h.details.weekdayHours?.length ? `\n  hours: ${h.details.weekdayHours.join('; ')}` : '';
+  return `${line}${week}`;
+}
+
 const matchesList = (p: SavedPlace, list: string) => !list || p.list.toLowerCase().startsWith(list.toLowerCase());
 
 export function placesPrompt(places: SavedPlaces, opts: { readOnly?: boolean } = {}): string {
@@ -41,13 +48,16 @@ export function placesPrompt(places: SavedPlaces, opts: { readOnly?: boolean } =
   return `
 Saved places:
 - Your owner keeps Google Maps lists of places they like or want to try${lists.length ? `: ${lists.join(', ')}` : ''}. For anything about where to eat, drink, get dessert or coffee, or hang out, check them first with places_find and lead with a saved spot that fits. Search the web only when nothing saved fits or they want something new.
+- places_find returns up to 25 at a time: page with offset (25, 50, ...) instead of saying it can't. For "a cafe I haven't been to", read the been-to note, pass those names as exclude, and the result is the exact remainder of the saved list; show the first few and say how many are left.
 - "Near me" means home unless the conversation or their calendar says they're somewhere else. For a trip or a plan on a date, look at calendar_events to see where they'll be, and search near there.
+- To find where a shop, restaurant or brand's store is, or its hours, use places_lookup (one call per place, near set to the city or area) before the web: it returns Google Maps' own address, hours and link. Search the web only for what Maps doesn't have.
+- A name from a reel or a voice note is often spelled the way it sounds ("Ah-fu-ri" for AFURI, "Blue Dore" for Blue Door). Before saying a place can't be found, check the owner's notes and saved places for a similar name (search_notes, places_find), then try the spellings it could be, its Japanese or local name, and "<name> flagship <city>". Say which match you went with, and that it's a match by sound when it is.
 - Say why a spot fits in a few words (their note, distance, open now) and include its Maps link. If its hours are unknown, say so rather than guessing.` +
     (opts.readOnly
       ? ''
       : `
 - When they share a place (a reel, a link, a name) without saying what to do, save it with places_add right away, to the existing list that fits (a restaurant goes in food). Don't start a new list unless they ask for one, by name or by where it goes ("save these for the Japan trip" means a Japan trip list).
-- Set near to the city or area the post names ("Shimokitazawa, Tokyo", "San Francisco"); left empty it searches near home. If the post gives an address, or the match isn't the place the post means, search by that address instead of the name. Put the context in the note: the trip it's for, if your journal or notes show one there, and what the reel or post recommended.
+- Set near to the city or area the post names ("Harajuku, Tokyo", "Chicago"); left empty it searches near home. If the post gives an address, or the match isn't the place the post means, search by that address instead of the name. Put the context in the note: the trip it's for, if your journal or notes show one there, and what the reel or post recommended.
 - places_add saves to Squire's copy only: Google has no way to write to Maps lists. Give the place's Maps link so they can tap Save on their phone, and mention the Squire-only part once in a conversation, not with every place.`);
 }
 
@@ -91,11 +101,13 @@ export function placesTools(
             list: { type: 'string', description: 'List name or its start ("food", "bars"); empty string for all lists.' },
             text: { type: 'string', description: 'Words to match ("ramen", "rooftop", "matcha"); empty string for anything.' },
             near: { type: 'string', description: '"home", a place or area ("Union Square SF", "the Chicago Loop"), or empty string for anywhere.' },
-            within_km: { type: 'number', description: 'Only places this close to "near"; 0 for no limit.' },
+            within_miles: { type: 'number', description: 'Only places this many miles from "near" or closer; 0 for no limit.' },
             open_now: { type: 'boolean', description: 'Only places open right now (places with unknown hours are left out and counted).' },
             limit: { type: 'integer', description: 'How many to return, 1-25.' },
+            offset: { type: 'integer', description: 'Skip this many results, to page: 25 for the next 25 after a full page; 0 for the first.' },
+            exclude: { type: 'array', items: { type: 'string' }, description: 'Names to leave out (places already visited, from a note), matched by name containing it; empty array for none.' },
           },
-          required: ['list', 'text', 'near', 'within_km', 'open_now', 'limit'],
+          required: ['list', 'text', 'near', 'within_miles', 'open_now', 'limit', 'offset', 'exclude'],
           additionalProperties: false,
         },
       },
@@ -104,8 +116,11 @@ export function placesTools(
         const list = String(args.list ?? '').trim();
         const words = String(args.text ?? '').toLowerCase().split(/\s+/).filter(Boolean);
         const nearText = String(args.near ?? '').trim();
-        const within = Number(args.within_km) || 0;
+        const within = (Number(args.within_miles) || 0) * KM_PER_MILE;
         const limit = Math.min(25, Math.max(1, Number(args.limit) || 10));
+
+        const offset = Math.max(0, Math.floor(Number(args.offset) || 0));
+        const exclude = (Array.isArray(args.exclude) ? args.exclude : []).map((x) => String(x).trim().toLowerCase()).filter(Boolean);
 
         let from: (LatLng & { label?: string }) | undefined;
         if (nearText.toLowerCase() === 'home') {
@@ -125,6 +140,7 @@ export function placesTools(
           const names = places.lists().map((l) => l.name).join(', ');
           return `No saved places match.${list ? ` Lists are: ${names}.` : ''}`;
         }
+        if (exclude.length) hits = hits.filter((p) => !exclude.some((x) => p.name.toLowerCase().includes(x)));
         if (from && within > 0) hits = hits.filter((p) => p.location && distanceKm(from, p.location) <= within);
         let unknownHours = 0;
         if (args.open_now === true) {
@@ -140,10 +156,39 @@ export function placesTools(
             : (b.details?.rating ?? 0) - (a.details?.rating ?? 0),
         );
         const header = from?.label ? `Near ${from.label}:` : '';
-        const lines = hits.slice(0, limit).map((p) => describe(p, now, from));
-        if (hits.length > limit) lines.push(`(${hits.length - limit} more)`);
+        const lines = hits.slice(offset, offset + limit).map((p) => describe(p, now, from));
+        if (offset > 0 && lines.length === 0) return `Nothing past ${offset}: only ${hits.length} match.`;
+        if (hits.length > offset + limit) lines.push(`(${hits.length - offset - limit} more: offset ${offset + limit} for the next page)`);
         if (unknownHours) lines.push(`(${unknownHours} matching places left out: hours unknown)`);
         return [header, ...lines].filter(Boolean).join('\n') || 'Nothing saved fits that.';
+      },
+    },
+    {
+      def: {
+        name: 'places_lookup',
+        description:
+          "Look a place up on Google Maps without saving it: up to three matches with address, this week's hours, rating and Maps link. For where a shop or brand's store is, or when it's open.",
+        strict: true,
+        input_schema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'The place, with enough to find it: "Blue Door flagship Harajuku Tokyo", "Tartine Bakery San Francisco".' },
+            near: { type: 'string', description: 'City or area to search around ("Harajuku, Tokyo"), or empty string for near home.' },
+          },
+          required: ['query', 'near'],
+          additionalProperties: false,
+        },
+      },
+      async run(args) {
+        const query = String(args.query ?? '').trim();
+        if (!query) throw new Error('Say which place to look up.');
+        const nearText = String(args.near ?? '').trim();
+        const near = nearText && nearText.toLowerCase() !== 'home' ? await places.locate(nearText) : undefined;
+        if (nearText && nearText.toLowerCase() !== 'home' && !near) throw new Error(`Couldn't place "${nearText}" on the map. Try a fuller area name and city.`);
+        const hits = await places.lookup(query, near);
+        if (hits.length === 0) return `Google Maps found nothing for "${query}". Try another spelling, the local-language name, or the street address.`;
+        // Only biased to the area, so a namesake elsewhere can come first: say how far each is.
+        return hits.map((h) => lookedUp(h, clock(), near)).join('\n');
       },
     },
   ];

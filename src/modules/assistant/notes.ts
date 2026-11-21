@@ -1,9 +1,11 @@
 import { stringify } from 'yaml';
 import type { ToolHandler } from './llm.js';
-import type { Task } from './tasks.js';
 import type { ReadLog } from './readLog.js';
+import { setNoteFields } from './taskNotes.js';
+import { checkWritePath, factoryGuard } from './factoryGuard.js';
+import { ONTOLOGY_PROMPT } from './ontology.js';
 import { toLocalIso } from './time.js';
-import { BOT_FOLDER, INBOX_FOLDER, noteFileName, RECIPES_FOLDER, TASKS_FOLDER, TRAINING_FOLDER, WORKOUTS_FOLDER, type Vault } from '../../vault.js';
+import { BOT_FOLDER, INBOX_FOLDER, noteFileName, RECIPES_FOLDER, TRAINING_FOLDER, WORKOUTS_FOLDER, type Vault } from '../../vault.js';
 
 /**
  * The owner's Obsidian vault, for what they open themselves: task reports and
@@ -18,39 +20,11 @@ const MAX_LISTED = 200;
 
 const frontmatter = (fields: Record<string, unknown>) => `---\n${stringify(fields).trimEnd()}\n---\n`;
 
-/**
- * Discord-only markdown made plain for Obsidian: "-# " subtext lines lose
- * their marker, which Obsidian would read as a list item holding a tag.
- */
-const forObsidian = (text: string) => text.replace(/^-# /gm, '');
-
 /** Joins vault-relative parts, where "" is the vault root. */
 const vaultJoin = (...parts: string[]) => parts.filter(Boolean).join('/');
 
 /** How a vault-relative folder reads to the owner: "Travel/Japan/", or "the vault root". */
 const shown = (folder: string) => (folder ? `${folder}/` : 'the vault root');
-
-/** Saves a finished task's report under Squire/Tasks in the vault. Returns the note's path, or undefined when it couldn't be written. */
-export function saveTaskReport(vault: Vault, task: Task, timeZone: string): string | undefined {
-  const finished = new Date(task.finishedAt ?? Date.now());
-  const rel = vaultJoin(TASKS_FOLDER, `${toLocalIso(finished, timeZone).slice(0, 10)} ${noteFileName(task.title)}.md`);
-  const body =
-    frontmatter({
-      outcome: task.status === 'gave_up' ? "couldn't finish" : task.status,
-      requested: toLocalIso(new Date(task.createdAt), timeZone),
-      finished: toLocalIso(finished, timeZone),
-      channel: `#${task.channelName}`,
-      tags: ['squire-task'],
-    }) +
-    `\n# ${task.title}\n\n**Goal:** ${task.goal}\n\n**Done when:** ${task.doneWhen}\n\n## Report\n\n${forObsidian(task.result ?? '')}\n`;
-  try {
-    vault.write(rel, body);
-    return rel;
-  } catch (err) {
-    console.error(`[tasks] could not save the report for ${task.id} to the vault:`, err);
-    return undefined;
-  }
-}
 
 /**
  * Scaling a recipe is arithmetic on the source's amounts, not guesswork: the
@@ -65,12 +39,17 @@ Obsidian notes:
 - Your owner keeps notes in an Obsidian vault: recipes, checklists, project ideas, plus your past task reports (Squire/Tasks) and their training log (splits in Training, workouts in Squire/Workouts). The Squire folder holds only what you keep for yourself (Squire/Inbox, Squire/Tasks, Squire/Workouts); everything else is theirs and sits at the vault root: recipes in ${RECIPES_FOLDER} (sorted into subfolders such as ${RECIPES_FOLDER}/Meal), trips in Travel, and so on. Never put their notes under Squire, whatever an older conversation says. When they mention their notes, a list they keep, or something they wrote down, find it with search_notes and read it with read_note instead of guessing.
 - The whole vault is yours to organise as they ask. Paths are from the vault root, e.g. "Travel/Japan". save_note writes a note into any folder (Squire/Inbox when they don't say where, which is yours, not theirs: file things out of it when you can), creating folders as needed; it can also append to or replace a note. list_notes shows how a folder or the whole vault is laid out, move_note moves or renames a note or a whole folder, and delete_note puts one in Obsidian's trash. When they ask for a structure ("a Travel folder with Japan under it"), build it and move the notes in; don't tell them to do it in Obsidian.
 - Notes are for things they'll open themselves, so write clean markdown (headings, lists, links). Durable facts about them that help you go to memory instead, with remember.
+- When you look up details (addresses, hours, prices, the real name of a place) for things in one of their notes, or things you just saved there, put them into that note in the same reply: read_note, then save_note it back with each detail next to its item, marking guesses and unconfirmed ones. Don't leave them only in chat, and don't offer to add them; say in a few words that the note is updated.
 - Training and Squire/Workouts are the training log's own data: leave them to the training_ tools.
+${ONTOLOGY_PROMPT}
 ${RECIPE_SCALING_PROMPT}`;
 
-/** What a background worker is told about the notes it can read and write. */
-export const NOTES_TASK_PROMPT = `
-- You can read and write the owner's Obsidian notes with search_notes, list_notes, read_note and save_note. Paths are from the vault root: recipes live in ${RECIPES_FOLDER} (e.g. ${RECIPES_FOLDER}/Meal), trips in Travel. When the task says to write or replace a note, do it with save_note and say in your report which note you saved; read the existing note first if you're asked what changed. Never put the owner's notes under ${BOT_FOLDER}.
+/** What a background worker is told about the notes it can read and write, before any recipe rules. */
+export const NOTES_TASK_BASE = `
+- You can read and write the owner's Obsidian notes with search_notes, list_notes, read_note and save_note. Paths are from the vault root: recipes live in ${RECIPES_FOLDER} (e.g. ${RECIPES_FOLDER}/Meal), trips in Travel. When the task says to write or replace a note, do it with save_note and say in your report which note you saved; read the existing note first if you're asked what changed. Never put the owner's notes under ${BOT_FOLDER}.`;
+
+/** What a background worker with no job is told about notes: the base plus the recipe rules. A job's prompt note replaces the recipe rules. */
+export const NOTES_TASK_PROMPT = `${NOTES_TASK_BASE}
 ${RECIPE_SCALING_PROMPT}`;
 
 /** The note tools a background worker gets: no moving or deleting while nobody is watching. */
@@ -110,7 +89,26 @@ function recipeSources(reads: ReadLog, raw: unknown, content: string): string {
   return lines.length ? `\n\n## Sources\n${lines.join('\n')}` : '';
 }
 
-export function notesTools(vault: Vault, timeZone: string, reads?: ReadLog): ToolHandler[] {
+/** A note a shadow-mode job would have written: everything checked, nothing saved. */
+export interface ProposedNote {
+  path: string;
+  content: string;
+  mode: 'create' | 'append' | 'replace';
+}
+
+export interface NotesToolOptions {
+  /** Shadow mode: save_note checks the note as usual, then hands it here instead of writing it. */
+  propose?: (note: ProposedNote) => void;
+  /** A background task's note, as a [[link]]: every note save_note writes gets source-task pointing back to it. */
+  sourceTask?: string;
+  /** The owner's message this reply answers: a note in Factory/ beyond results and testing prompts changes only when it names that note. Background tasks have none. */
+  ownerText?: string;
+  /** A factory job's write_paths: save_note writes only under these. */
+  writePaths?: string[];
+  job?: string;
+}
+
+export function notesTools(vault: Vault, timeZone: string, reads?: ReadLog, options: NotesToolOptions = {}): ToolHandler[] {
   // The training log's files are read and written by code that expects them where they are.
   const guard = (rel: string) => {
     for (const folder of [TRAINING_FOLDER, WORKOUTS_FOLDER]) {
@@ -168,10 +166,21 @@ export function notesTools(vault: Vault, timeZone: string, reads?: ReadLog): Too
         if (args.mode === 'create' && existing !== undefined) {
           throw new Error(`${rel} already exists. Use "append" to add to it, or pick another title.`);
         }
-        const next =
+        let next =
           args.mode === 'append' && existing !== undefined
             ? `${existing.trimEnd()}\n\n${content}\n`
-            : `${frontmatter({ created: toLocalIso(new Date(), timeZone), tags: ['squire'] })}\n${content}\n`;
+            : content.startsWith('---\n')
+              ? // Content with its own frontmatter (a prompt note's job and status) keeps it, with created added.
+                setNoteFields(`${content}\n`, { created: toLocalIso(new Date(), timeZone) })
+              : `${frontmatter({ created: toLocalIso(new Date(), timeZone), tags: ['squire'] })}\n${content}\n`;
+        // The note links back to the task that wrote it, as the task's output links to the note.
+        if (options.sourceTask) next = setNoteFields(next, { 'source-task': options.sourceTask });
+        factoryGuard(vault, rel, 'write', { next, ownerText: options.ownerText });
+        checkWritePath(options.writePaths, options.job, rel);
+        if (options.propose) {
+          options.propose({ path: rel, content: next, mode: args.mode === 'append' ? 'append' : args.mode === 'replace' ? 'replace' : 'create' });
+          return `Proposed ${rel} (shadow mode: not saved). It goes in your report for the owner to approve; say in the report that it's waiting for their OK.`;
+        }
         vault.write(rel, next);
         return `${existing !== undefined && args.mode !== 'create' ? (args.mode === 'append' ? 'Appended to' : 'Replaced') : 'Saved'} ${rel}.`;
       },
@@ -229,6 +238,8 @@ export function notesTools(vault: Vault, timeZone: string, reads?: ReadLog): Too
         if (isNote && !to.endsWith('.md')) to = vaultJoin(to, from.split('/').at(-1)!);
         if (!isNote && to.endsWith('.md')) throw new Error('A folder needs a folder path, not a .md name.');
         guardBotFolder(to);
+        factoryGuard(vault, from, 'move', { ownerText: options.ownerText });
+        factoryGuard(vault, to, 'move', { ownerText: options.ownerText });
         vault.move(from, to);
         return `Moved ${from} to ${to}.`;
       },
@@ -249,6 +260,7 @@ export function notesTools(vault: Vault, timeZone: string, reads?: ReadLog): Too
         const path = vault.notePath(String(args.path ?? ''));
         guard(path);
         if (!path) throw new Error("The vault root can't be deleted.");
+        factoryGuard(vault, path, 'delete', { ownerText: options.ownerText });
         const name = path.split('/').at(-1)!;
         let dest = `.trash/${name}`;
         for (let i = 2; vault.isDir(dest) || vault.read(dest) !== undefined; i++) {

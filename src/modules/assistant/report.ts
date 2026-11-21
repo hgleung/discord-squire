@@ -9,7 +9,7 @@ import { toLocalIso, toLocalShort } from './time.js';
  */
 
 const cost = (events: ActivityEvent[]) => events.reduce((sum, e) => sum + (e.costUsd ?? 0), 0);
-const KIND_LABEL: Record<string, string> = { reply: 'chat replies', task: 'background tasks', journal: 'journal summaries', brief: 'morning briefs', update: 'updates' };
+const KIND_LABEL: Record<string, string> = { reply: 'chat replies', task: 'background tasks', journal: 'journal summaries', brief: 'morning briefs', update: 'updates', style: 'voice profile' };
 
 /** /usage: spending by day, by kind, and the priciest jobs. */
 export function usageSummary(events: ActivityEvent[], timeZone: string, days: number): string {

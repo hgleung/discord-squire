@@ -21,6 +21,7 @@ export interface CalendarEvent {
   id: string;
   summary?: string;
   location?: string;
+  description?: string;
   start?: EventTime;
   end?: EventTime;
 }
@@ -54,19 +55,34 @@ function zoneArg(value: unknown, fallback: string): string {
 
 /**
  * All-day events show as dates (end is exclusive, so a one-day event is just
- * its date). Timed events show in the zone they were made in, named when it
- * isn't the owner's: a 4 PM check-in in Tokyo reads as 16:00, not as the
- * midnight it is in California.
+ * its date). A multi-day one also names the day it ends on, since a stay
+ * booked "Apr 8-13" is an event whose last day is the 12th: without it, the
+ * 12th reads as a different checkout date from the booking's 13th. Timed
+ * events show in the zone they were made in, named when it isn't the
+ * owner's: a 4 PM check-in in Tokyo reads as 16:00, not as the midnight it is
+ * in California.
  */
 export function when(e: CalendarEvent, timeZone: string): string {
   if (e.start?.date) {
     const lastDay = e.end?.date ? new Date(Date.parse(`${e.end.date}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10) : e.start.date;
-    return lastDay > e.start.date ? `${e.start.date} to ${lastDay} (all day)` : `${e.start.date} (all day)`;
+    return lastDay > e.start.date ? `${e.start.date} to ${lastDay} (all day; ends ${e.end!.date}, the checkout day for a stay)` : `${e.start.date} (all day)`;
   }
   const zone = e.start?.timeZone || timeZone;
   const start = e.start?.dateTime ? toLocalShort(new Date(e.start.dateTime), zone) : '?';
   const end = e.end?.dateTime ? toLocalShort(new Date(e.end.dateTime), zone) : '?';
   return zone === timeZone ? `${start} – ${end}` : `${start} – ${end} ${zone} time`;
+}
+
+/** A timed event shown in the owner's zone, with no other zone named. */
+const inOwnerZone = (e: CalendarEvent, timeZone: string) => !!e.start?.dateTime && (e.start.timeZone || timeZone) === timeZone;
+
+/**
+ * An event abroad saved without a zone of its own (or in the owner's) shows
+ * in the owner's time: a 16:50 departure from Tokyo reads as 00:50, which
+ * looks like a different time from the booking's.
+ */
+export function ownerZoneNote(timeZone: string): string {
+  return `(Times with no zone named are in ${timeZone}, the owner's zone. An event abroad saved without its own zone still shows in that time, so a 16:50 Tokyo departure reads as 00:50 here: convert to local time there before comparing with a booking, notes or the journal.)`;
 }
 
 const startMs = (e: CalendarEvent) => Date.parse(e.start?.dateTime ?? `${e.start?.date}T00:00:00Z`);
@@ -127,6 +143,7 @@ export function calendarTools(account: GoogleAccount, timeZone: string, readOnly
             .join(' · '),
         );
         if (all.length > EVENT_CAP) lines.push(`(${all.length - EVENT_CAP} more; narrow the range)`);
+        if (all.some(({ e }) => inOwnerZone(e, timeZone))) lines.push(ownerZoneNote(timeZone));
         return lines.join('\n');
       },
     },

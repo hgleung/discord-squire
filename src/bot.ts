@@ -1,6 +1,6 @@
 import { Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 import type { Guild } from 'discord.js';
-import type { BotModule, Command } from './modules/types.js';
+import type { BotModule, Command, MessageMenu, ModalHandler } from './modules/types.js';
 
 export interface BotOptions {
   token: string;
@@ -21,6 +21,18 @@ export function startBot(opts: BotOptions): Client {
       const name = cmd.data.name;
       if (commands.has(name)) throw new Error(`Command /${name} is defined by more than one module.`);
       commands.set(name, cmd);
+    }
+  }
+  const menus = new Map<string, MessageMenu>();
+  const modals = new Map<string, ModalHandler>();
+  for (const mod of opts.modules) {
+    for (const menu of mod.messageMenus ?? []) {
+      if (menus.has(menu.data.name)) throw new Error(`Message menu "${menu.data.name}" is defined by more than one module.`);
+      menus.set(menu.data.name, menu);
+    }
+    for (const modal of mod.modals ?? []) {
+      if (modals.has(modal.prefix)) throw new Error(`Modal prefix "${modal.prefix}" is used by more than one module.`);
+      modals.set(modal.prefix, modal);
     }
   }
 
@@ -44,7 +56,7 @@ export function startBot(opts: BotOptions): Client {
   // Registering per guild (rather than once, globally) also means the bot
   // can be in several servers at once, and leaving one clears its commands
   // there immediately, with nothing to clean up.
-  const payload = [...commands.values()].map((c) => c.data.toJSON());
+  const payload = [...[...commands.values()].map((c) => c.data.toJSON()), ...[...menus.values()].map((m) => m.data.toJSON())];
   const registerIn = (guild: Guild) => guild.commands.set(payload);
 
   // Events.ClientReady, not the 'ready' string: discord.js v15 drops the old
@@ -53,7 +65,7 @@ export function startBot(opts: BotOptions): Client {
     console.log(`Logged in as          ${client.user?.tag}`);
     const guilds = [...client.guilds.cache.values()];
     await Promise.all(guilds.map((g) => registerIn(g)));
-    console.log(`Commands registered   ${commands.size} in ${guilds.map((g) => g.name).join(', ') || '(no servers yet)'}`);
+    console.log(`Commands registered   ${commands.size + menus.size} in ${guilds.map((g) => g.name).join(', ') || '(no servers yet)'}`);
     console.log(`Access                ${opts.ownerId ? `restricted to user ${opts.ownerId}` : 'open to the whole server'}`);
     for (const mod of opts.modules) {
       for (const line of mod.describe?.() ?? []) console.log(line);
@@ -74,7 +86,7 @@ export function startBot(opts: BotOptions): Client {
   // link works right away instead of needing a restart.
   client.on(Events.GuildCreate, async (guild) => {
     await registerIn(guild);
-    console.log(`Commands registered   ${commands.size} in ${guild.name} (just joined)`);
+    console.log(`Commands registered   ${commands.size + menus.size} in ${guild.name} (just joined)`);
   });
 
   client.on(Events.InteractionCreate, async (i) => {
@@ -83,6 +95,17 @@ export function startBot(opts: BotOptions): Client {
         const cmd = commands.get(i.commandName);
         if (!mayRun(cmd, i.user.id)) return void (await i.respond([]));
         await cmd?.autocomplete?.(i);
+        return;
+      }
+      // Message menus and the modals they open are owner-only.
+      if (i.isMessageContextMenuCommand() || i.isModalSubmit()) {
+        const handler = i.isMessageContextMenuCommand() ? menus.get(i.commandName) : modals.get(i.customId.split(':')[0]!);
+        if (!handler) return;
+        if (!isOwner(i.user.id)) {
+          await i.reply({ content: 'This is owner-only.', flags: MessageFlags.Ephemeral });
+          return;
+        }
+        await (handler.run as (x: typeof i) => Promise<void>)(i);
         return;
       }
       if (!i.isChatInputCommand()) return;
@@ -97,7 +120,7 @@ export function startBot(opts: BotOptions): Client {
       // it rejects, so the catch below would never see the failure.
       await cmd.run(i);
     } catch (err) {
-      console.error(`/${i.isChatInputCommand() ? i.commandName : 'interaction'} failed:`, err);
+      console.error(`/${i.isChatInputCommand() || i.isMessageContextMenuCommand() ? i.commandName : 'interaction'} failed:`, err);
       const content = `⚠️ ${err instanceof Error ? err.message : String(err)}`;
       if (i.isRepliable()) {
         if (i.deferred || i.replied) await i.editReply(content).catch(() => {});

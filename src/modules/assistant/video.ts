@@ -24,6 +24,8 @@ const FRAME_MAX_SECONDS = 4 * 60;
 /** With no transcript, frames are all there is, so longer videos get them too. */
 const FRAME_MAX_SECONDS_SILENT = 15 * 60;
 const FRAME_COUNT = 8;
+/** Frames when asked for a closer look, e.g. names that flash by on screen. */
+export const FRAME_COUNT_CLOSE = 24;
 const MAX_DOWNLOAD = '60M';
 const MAX_TRANSCRIPT_CHARS = 30_000;
 const MAX_DESCRIPTION_CHARS = 8_000;
@@ -147,9 +149,9 @@ async function download(url: string, dir: string): Promise<string | undefined> {
 }
 
 /** Evenly spaced frames from a downloaded video. */
-async function frames(file: string, duration: number, dir: string): Promise<ImagePart[]> {
-  const fps = FRAME_COUNT / duration;
-  await run(ffmpegPath!, ['-hide_banner', '-loglevel', 'error', '-i', file, '-vf', `fps=${fps.toFixed(4)},scale=768:-2`, '-frames:v', String(FRAME_COUNT), '-q:v', '5', join(dir, 'frame-%02d.jpg')], { timeout: 60_000 });
+async function frames(file: string, duration: number, dir: string, count = FRAME_COUNT): Promise<ImagePart[]> {
+  const fps = count / duration;
+  await run(ffmpegPath!, ['-hide_banner', '-loglevel', 'error', '-i', file, '-vf', `fps=${fps.toFixed(4)},scale=768:-2`, '-frames:v', String(count), '-q:v', '5', join(dir, 'frame-%02d.jpg')], { timeout: 60_000 });
   return readdirSync(dir)
     .filter((f) => f.startsWith('frame-'))
     .sort()
@@ -288,7 +290,7 @@ async function readInstagramSlides(info: VideoInfo, slides: { images: string[]; 
   return { content: lines.join('\n'), images };
 }
 
-export async function readVideo(url: string, language?: string): Promise<{ content: string; images: ImagePart[] }> {
+export async function readVideo(url: string, language?: string, closer = false): Promise<{ content: string; images: ImagePart[] }> {
   // yt-dlp opens any page it's given; keep it off the home network.
   await assertPublic(new URL(url));
   const photo = (await resolveTikTok(url)).match(TIKTOK_PHOTO);
@@ -350,7 +352,7 @@ export async function readVideo(url: string, language?: string): Promise<{ conte
         }
       }
       if (duration && duration <= frameMax) {
-        images = await frames(file, duration, dir);
+        images = await frames(file, duration, dir, closer ? FRAME_COUNT_CLOSE : FRAME_COUNT);
         if (images.length) notes.push(`${images.length} frames, evenly spaced through the video, are attached: read any on-screen text (ingredients, amounts, steps) from them.`);
       } else {
         notes.push('(No frames: the video is long, so the transcript and description are what there is.)');
@@ -367,9 +369,9 @@ export async function readVideo(url: string, language?: string): Promise<{ conte
 }
 
 export const VIDEO_PROMPT = `
-- Video links (YouTube, Instagram reels, TikTok and the like) open with watch_video, which gives the title, creator, description or caption, a transcript (from captions, or transcribed from the audio on the PC when there are none), and a few frames from short videos. For a recipe, put it together from all of them: creators often list ingredients in the description or on screen and only say the steps. A transcript made on the PC can mishear names and amounts, so prefer what's written on screen or in the caption when they disagree. Instagram picture and carousel posts (/p/ links) and TikTok photo posts (slideshows) open with watch_video too and come back as the caption and the slide pictures, so read the text on every slide; never ask for screenshots of a post before trying watch_video. If the caption or title shows the video isn't in English, pass that language to watch_video. Say plainly what's missing (no amounts given, no speech) instead of inventing it.
+- Video links (YouTube, Instagram reels, TikTok and the like) open with watch_video, which gives the title, creator, description or caption, a transcript (from captions, or transcribed from the audio on the PC when there are none), and a few frames from short videos. For a recipe, put it together from all of them: creators often list ingredients in the description or on screen and only say the steps. A transcript made on the PC can mishear names and amounts, so prefer what's written on screen or in the caption when they disagree. Instagram picture and carousel posts (/p/ links) and TikTok photo posts (slideshows) open with watch_video too and come back as the caption and the slide pictures, so read the text on every slide; never ask for screenshots of a post before trying watch_video. If the caption or title shows the video isn't in English, pass that language to watch_video. Say plainly what's missing (no amounts given, no speech) instead of inventing it. If a read missed names or amounts that show on screen, or they say it's there, call watch_video again with more_frames: true instead of repeating the same call, and if it still isn't there, say so and ask for the list.
 - When they share a video, open it with watch_video in that reply before saying anything about what's in it. Prices, dishes and amounts come only from what watch_video returned, never from what's typical or from an earlier reply.
-- A recipe video shared without other instructions (in #recipes above all) is for saving: save it with their other recipe notes in that reply, marking anything the video leaves out ("amounts not given"), then offer to fill the gap. Don't ask first whether to save it.`;
+- A recipe video shared without other instructions (in #recipes above all) is for saving. If you have start_task, hand it to the recipe factory as the Recipe factory section says. Otherwise save it with their other recipe notes in that reply, marking anything the video leaves out ("amounts not given"), then offer to fill the gap. Don't ask first whether to save it.`;
 
 export function videoTools(): ToolHandler[] {
   return [
@@ -377,7 +379,7 @@ export function videoTools(): ToolHandler[] {
       def: {
         name: 'watch_video',
         description:
-          'Read a video link (YouTube, Instagram including picture and carousel posts, TikTok including photo posts, and most other video sites): title, creator, description or caption, a transcript (from its captions, or transcribed from the audio when it has none), and 8 frames to read on-screen text from (for videos up to 4 minutes, or 15 when there are no captions).',
+          'Read a video link (YouTube, Instagram including picture and carousel posts, TikTok including photo posts, and most other video sites): title, creator, description or caption, a transcript (from its captions, or transcribed from the audio when it has none), and 8 frames (24 with more_frames) to read on-screen text from (for videos up to 4 minutes, or 15 when there are no captions).',
         // Not strict: the API compiles every strict schema into one grammar
         // with a size limit, and the slots go to tools that change things.
         // A malformed call here only reads, and fails with a clear error.
@@ -391,6 +393,10 @@ export function videoTools(): ToolHandler[] {
               description:
                 'The spoken language in English, lowercase ("english", "korean", "spanish"), used if the audio has to be transcribed. Use "english" unless the title or caption shows otherwise.',
             },
+            more_frames: {
+              type: 'boolean',
+              description: 'true for a closer look: 24 frames instead of 8. Use it when the first read missed on-screen text (names, amounts) that flashes by.',
+            },
           },
           required: ['url', 'language'],
           additionalProperties: false,
@@ -401,7 +407,7 @@ export function videoTools(): ToolHandler[] {
         if (!url) throw new Error('That is not an http(s) link.');
         if (parseDiscordLink(url)) throw new Error('That is a Discord link; use read_discord_messages.');
         const language = String(args.language ?? '').trim().toLowerCase();
-        return readVideo(url, language && language !== 'english' ? language : undefined);
+        return readVideo(url, language && language !== 'english' ? language : undefined, args.more_frames === true);
       },
     },
   ];

@@ -13,11 +13,20 @@
     "check:music": "tsx src/modules/music/check.ts && tsx src/modules/music/queue.check.ts && tsx src/modules/music/loop.check.ts",
     "web": "npm --prefix web run dev",
     "web:build": "npm --prefix web run build",
-    "check:assistant": "tsx src/modules/assistant/check.ts && tsx src/modules/assistant/google.check.ts",
+    "check:assistant": "tsx src/modules/assistant/check.ts && tsx src/modules/assistant/google.check.ts && tsx src/modules/assistant/features.check.ts && tsx src/modules/assistant/factory.check.ts && tsx src/modules/assistant/vault.check.ts",
     "check:assistant:live": "tsx src/modules/assistant/live.ts",
     "google:auth": "tsx src/modules/assistant/googleAuth.ts",
     "training:import": "tsx src/modules/training/import.ts",
-    "review:digest": "tsx src/modules/assistant/reviewDigest.ts"
+    "review:digest": "tsx src/modules/assistant/reviewDigest.ts",
+    "tickets": "tsx src/modules/assistant/ticketsCli.ts",
+    "eval": "tsx src/modules/assistant/evalCli.ts",
+    "prompt:propose": "tsx src/modules/assistant/promptCli.ts",
+    "factory": "tsx src/modules/assistant/factoryCli.ts",
+    "vault:migrate": "tsx src/modules/assistant/vaultMigrateCli.ts",
+    "sync": "tsx src/modules/assistant/syncCli.ts",
+    "vault:lint": "tsx src/modules/assistant/vaultLintCli.ts",
+    "vault:health": "tsx src/modules/assistant/vaultHealthCli.ts",
+    "improve": "tsx src/modules/assistant/improveCli.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",

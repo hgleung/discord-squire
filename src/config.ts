@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { systemTimeZone } from './modules/assistant/time.js';
 import { EFFORTS, type Effort, type OwnerProfile } from './modules/assistant/llm.js';
 import { MAILBOX_NAME, extraTokenFile, type GoogleConfig } from './modules/assistant/google.js';
+import { parseChannelTools, type ChannelToolsConfig } from './modules/assistant/channelTools.js';
+import { DEFAULT_WEEKLY_DAY, WEEKDAYS } from './modules/assistant/weekly.js';
 
 export interface Config {
   discord: {
@@ -45,6 +47,8 @@ export interface Config {
     /** Local hour for the morning brief, or undefined when it's off. */
     briefHour?: number;
     briefFile: string;
+    /** Messages the owner flagged with /ticket, for the nightly review. */
+    ticketsFile: string;
     /** The brief's channel ID; unset means #misc, kept by ID once found. */
     briefChannelId?: string;
     profile: OwnerProfile;
@@ -52,6 +56,14 @@ export interface Config {
     google?: GoogleConfig;
     /** Saved Google Maps lists; off unless share links are listed. */
     places?: { listUrls: string[]; apiKey?: string; file: string; home?: string };
+    /** Which tools each channel in the chosen Discord category gets. */
+    channelTools: ChannelToolsConfig;
+    /** Search by meaning, with a local Ollama embedding model; off when undefined. */
+    semantic?: { host: string; model: string; file: string };
+    /** The weekday (Sun, Mon…) whose brief becomes the weekly review; undefined turns it off. */
+    weeklyDay?: string;
+    /** The owner's own messages and the voice profile built from them; off when undefined. */
+    styleFile?: string;
   };
 }
 
@@ -99,6 +111,20 @@ function loadAssistant(): Config['assistant'] {
     console.error(`GOOGLE_EXTRA_ACCOUNTS: "${badName}" should be a short name of letters, digits and dashes (not main or all), like work.`);
     process.exit(1);
   }
+  let channelOverrides: ChannelToolsConfig['overrides'];
+  try {
+    channelOverrides = parseChannelTools(optional('ASSISTANT_CHANNEL_TOOLS'));
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
+  const category = optional('ASSISTANT_TOOL_CATEGORY') ?? 'squire';
+  const weekly = optional('WEEKLY_REVIEW_DAY') ?? DEFAULT_WEEKLY_DAY;
+  const weeklyDay = weekly.toLowerCase() === 'off' ? undefined : WEEKDAYS.find((d) => weekly.toLowerCase().startsWith(d.toLowerCase()));
+  if (weekly.toLowerCase() !== 'off' && !weeklyDay) {
+    console.error('WEEKLY_REVIEW_DAY must be a weekday (Sunday, Mon…) or off.');
+    process.exit(1);
+  }
   return {
     channelIds,
     model: optional('ASSISTANT_MODEL') ?? 'claude-haiku-5-5',
@@ -114,6 +140,7 @@ function loadAssistant(): Config['assistant'] {
     activityDir: optional('ACTIVITY_DIR') ?? fileURLToPath(new URL('../data/activity', import.meta.url)),
     briefHour,
     briefFile: fileURLToPath(new URL('../data/brief.json', import.meta.url)),
+    ticketsFile: optional('TICKETS_FILE') ?? fileURLToPath(new URL('../data/tickets.json', import.meta.url)),
     briefChannelId: optional('MORNING_BRIEF_CHANNEL_ID'),
     profile: { location: parseLocation(optional('ASSISTANT_LOCATION'), timeZone), about: optional('ASSISTANT_ABOUT_ME') },
     google:
@@ -133,6 +160,18 @@ function loadAssistant(): Config['assistant'] {
           home: optional('ASSISTANT_LOCATION'),
         }
       : undefined,
+    channelTools: { category: category.toLowerCase() === 'off' ? undefined : category, overrides: channelOverrides },
+    semantic:
+      optional('SEMANTIC_SEARCH')?.toLowerCase() === 'off'
+        ? undefined
+        : {
+            host: optional('OLLAMA_HOST') ?? 'http://localhost:11434',
+            model: optional('OLLAMA_EMBED_MODEL') ?? 'nomic-embed-text',
+            file: fileURLToPath(new URL('../data/semantic.json', import.meta.url)),
+          },
+    weeklyDay,
+    styleFile:
+      optional('ASSISTANT_VOICE')?.toLowerCase() === 'off' ? undefined : (optional('STYLE_FILE') ?? fileURLToPath(new URL('../data/style.json', import.meta.url))),
   };
 }
 

@@ -113,11 +113,14 @@ export function fromMessage(
   response: Pick<Anthropic.Beta.BetaMessage, 'content' | 'stop_reason'> & Partial<Pick<Anthropic.Beta.BetaMessage, 'usage' | 'model'>>,
 ): Generation {
   let text = '';
+  let finalText = '';
   const sources = new Sources();
   const calls: Generation['calls'] = [];
   for (const block of response.content) {
+    if (block.type === 'server_tool_use' || block.type === 'web_search_tool_result' || block.type === 'web_fetch_tool_result') finalText = '';
     if (block.type === 'text') {
       text += block.text;
+      finalText += block.text;
       for (const c of block.citations ?? []) {
         if (c.type === 'web_search_result_location' && c.url) sources.pages.set(c.url, c.title ?? c.url);
       }
@@ -149,7 +152,7 @@ export function fromMessage(
         webFetches: u.server_tool_use?.web_fetch_requests ?? 0,
       }
     : undefined;
-  return { stop, text, calls, sources, turn: { role: 'assistant', text, calls, native: response.content }, usage };
+  return { stop, text, finalText, calls, sources, turn: { role: 'assistant', text, calls, native: response.content }, usage };
 }
 
 export class AnthropicLLM implements LLM {
