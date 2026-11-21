@@ -88,10 +88,10 @@ try {
   {
     const vault = new Vault(mkdtempSync(join(dir, 'exp-')));
     const path = appendExpense(vault, { date: '2026-11-18', merchant: 'Trader Joe|s', amount: 42.5, currency: 'USD', category: 'groceries', note: '' });
-    appendExpense(vault, { date: '2026-11-19', merchant: 'Sunrise', amount: 18, currency: 'usd', category: 'dining', note: 'with Chris' });
+    appendExpense(vault, { date: '2026-11-19', merchant: 'Tartine', amount: 18, currency: 'usd', category: 'dining', note: 'with Chris' });
     const note = vault.read(path) ?? '';
     check('expenses: one note per month', path === 'Finance/Expenses/2026-11.md', path);
-    check('expenses: header once, a row each', note.split('| Date |').length === 2 && note.includes('| 2026-11-18 | Trader Joe/s | $42.50 | groceries |') && note.includes('| 2026-11-19 | Sunrise | $18.00 | dining | with Chris |'), note);
+    check('expenses: header once, a row each', note.split('| Date |').length === 2 && note.includes('| 2026-11-18 | Trader Joe/s | $42.50 | groceries |') && note.includes('| 2026-11-19 | Tartine | $18.00 | dining | with Chris |'), note);
     const [tool] = expenseTools(vault, LA, () => new Date('2026-12-02T20:00:00Z'));
     const out = String(await tool!.run({ date: '', merchant: 'Shell', amount: 61.2, currency: 'USD', category: 'transport', note: '' }));
     check('expenses: no date means today, in a new month', out.includes('2026-12.md') && (vault.read('Finance/Expenses/2026-12.md') ?? '').includes('| 2026-12-02 | Shell | $61.20 |'), out);

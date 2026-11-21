@@ -491,8 +491,8 @@ check(
 
 // --- owner profile ---
 const home = { city: 'Springfield', region: 'Oregon', country: 'US', timezone: LA };
-const about = profilePrompt({ location: home, about: 'Works downtown.' });
-check('profile names home and the free-text line', about.includes('Springfield, Oregon, US') && about.includes('Works downtown.'));
+const about = profilePrompt({ location: home, about: 'Works in San Francisco.' });
+check('profile names home and the free-text line', about.includes('Springfield, Oregon, US') && about.includes('Works in San Francisco.'));
 check('no profile adds nothing', profilePrompt({}) === '' && profilePrompt(undefined) === '');
 const search = webTools('claude-haiku-5-5', 5, home)[0] as { user_location?: { city?: string; type?: string } };
 check('web search is localised to home', search.user_location?.city === 'Springfield' && search.user_location.type === 'approximate');
@@ -596,7 +596,7 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     name,
     note ?? '',
   ];
-  const payload = `)]}'\n${JSON.stringify([[null, null, null, null, 'Dessert', null, null, null, [entry('Sunrise Bakery', '600 Guerrero St, SF', 37.7614, -122.4241, 'morning bun'), entry('Scoop Creamery', '3692 18th St, SF', 37.7616, -122.4257)]]])}`;
+  const payload = `)]}'\n${JSON.stringify([[null, null, null, null, 'Dessert', null, null, null, [entry('Tartine Bakery', '600 Guerrero St, SF', 37.7614, -122.4241, 'morning bun'), entry('Bi-Rite Creamery', '3692 18th St, SF', 37.7616, -122.4257)]]])}`;
   const parsed = parseListResponse(payload);
   check('shared list: title and places parsed', parsed.title === 'Dessert' && parsed.places.length === 2, JSON.stringify(parsed.places[0]));
   check('shared list: coordinates, address, note, cid', parsed.places[0]!.location?.lat === 37.7614 && parsed.places[0]!.note === 'morning bun' && parsed.places[0]!.cid === '0x80858:0x1a2b' && !parsed.places[1]!.note);
@@ -626,9 +626,9 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     const places = new SavedPlaces({ file: join(pdir, 'places.json'), listUrls: [] });
     places.store.data.lists = [{ url: 'u1', name: 'Dessert' }, { url: 'u2', name: 'Bars' }];
     places.store.data.places = [
-      { key: 'c1', list: 'Dessert', name: 'Sunrise Bakery', location: { lat: 37.7614, lng: -122.4241 }, note: 'morning bun', source: 'list', details: hours },
-      { key: 'c2', list: 'Dessert', name: 'Scoop Creamery', location: { lat: 37.7616, lng: -122.4257 }, source: 'list' },
-      { key: 'c3', list: 'Bars', name: 'Lantern Bar', location: { lat: 37.759, lng: -122.4114 }, source: 'list', details: { ...hours, periods: [] } },
+      { key: 'c1', list: 'Dessert', name: 'Tartine Bakery', location: { lat: 37.7614, lng: -122.4241 }, note: 'morning bun', source: 'list', details: hours },
+      { key: 'c2', list: 'Dessert', name: 'Bi-Rite Creamery', location: { lat: 37.7616, lng: -122.4257 }, source: 'list' },
+      { key: 'c3', list: 'Bars', name: 'Trick Dog', location: { lat: 37.759, lng: -122.4114 }, source: 'list', details: { ...hours, periods: [] } },
       { key: 'chat-1', list: 'Dessert', name: 'Dandelion Chocolate', location: { lat: 37.7609, lng: -122.4214 }, source: 'chat' },
     ];
     // "home" and a named area resolve from the remembered geocodes; no API here.
@@ -649,18 +649,18 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     check('a full page says how to get the next', page1.includes('offset 1'), page1);
     const page2 = await find({ limit: 1, offset: 1 });
     check('offset pages on without repeating', !page2.includes(page1.split(' · ')[0]!) && page2.includes('offset 2'), page2);
-    const rest = await find({ exclude: ['sunrise', 'SCOOP'] });
-    check('exclude drops visited names', !rest.includes('Sunrise') && !rest.includes('Scoop') && rest.includes('Lantern Bar'), rest);
+    const rest = await find({ exclude: ['tartine', 'BI-RITE'] });
+    check('exclude drops visited names', !rest.includes('Tartine') && !rest.includes('Bi-Rite') && rest.includes('Trick Dog'), rest);
     check('offset past the end says so', (await find({ offset: 50 })).startsWith('Nothing past 50'));
 
     const dessert = await find({ list: 'des' });
-    check('a list prefix picks the list', dessert.includes('Sunrise') && !dessert.includes('Lantern Bar'), dessert);
-    check('the owner\'s note is searchable', (await find({ text: 'bun' })).startsWith('Sunrise Bakery'));
+    check('a list prefix picks the list', dessert.includes('Tartine') && !dessert.includes('Trick Dog'), dessert);
+    check('the owner\'s note is searchable', (await find({ text: 'bun' })).startsWith('Tartine Bakery'));
     const near = await find({ near: 'Mission Dolores', within_miles: 0.25 });
-    check('near a place: nearest first, radius applied', near.split('\n')[1]?.startsWith('Scoop') === true && !near.includes('Lantern Bar'), near);
+    check('near a place: nearest first, radius applied', near.split('\n')[1]?.startsWith('Bi-Rite') === true && !near.includes('Trick Dog'), near);
     check('distances are shown in miles', / \d+\.\d mi · /.test(near) && !near.includes(' km'), near);
     const open = await find({ open_now: true });
-    check('open now keeps only known-open spots and counts the unknown', open.includes('Sunrise') && !open.includes('Scoop') && open.includes('3 matching places left out'), open);
+    check('open now keeps only known-open spots and counts the unknown', open.includes('Tartine') && !open.includes('Bi-Rite') && open.includes('3 matching places left out'), open);
     check('removing a Google list entry is refused', fail('places_remove', { key: 'c1' }).includes('remove it there'));
     await tools.get('places_remove')!.run({ key: 'chat-1' });
     check('a chat-added place can be removed', !new SavedPlaces({ file: join(pdir, 'places.json'), listUrls: [] }).places().some((p) => p.key === 'chat-1'));
@@ -673,11 +673,11 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     const sf = { lat: 37.7749, lng: -122.4194 };
     const fakeHit = (name: string, location: { lat: number; lng: number }) => ({ name, address: name, location, details: { placeId: name, fetchedAt: '' } });
     const withApi = places as unknown as { api?: { find: (q: string) => Promise<unknown> } };
-    withApi.api = { find: async (q) => (q.startsWith('F1rst') ? fakeHit('The F1rst Take, Salem', { lat: 37.3382, lng: -121.8863 }) : fakeHit('Bar Hikari, New Montgomery', { lat: 37.7867, lng: -122.3998 })) };
+    withApi.api = { find: async (q) => (q.startsWith('F1rst') ? fakeHit('The F1rst Take, Salem', { lat: 37.3382, lng: -121.8863 }) : fakeHit('Bar Shoji, New Montgomery', { lat: 37.7867, lng: -122.3998 })) };
     const farMatch = await places.add('Bars', 'F1rst Take', sf).then(() => '', (err: Error) => err.message);
     check('a match far from the area asked for is not saved', farMatch.startsWith('Not saved') && farMatch.includes('Salem') && !places.places().some((p) => p.name.includes('F1rst')), farMatch);
-    const nearMatch = await places.add('Bars', 'Hikari', sf);
-    check('a match in the area asked for is saved', nearMatch.name.startsWith('Bar Hikari'));
+    const nearMatch = await places.add('Bars', 'Shoji', sf);
+    check('a match in the area asked for is saved', nearMatch.name.startsWith('Bar Shoji'));
     // Seen in #travel, Nov 18: "check locations on each of those" had only web search, and three shops stayed unfound.
     const lookupApi = places as unknown as { api?: { lookup: (q: string) => Promise<unknown[]> } };
     lookupApi.api = {
@@ -1024,7 +1024,7 @@ check('web search is localised to home', search.user_location?.city === 'Springf
 
     const log = new ActivityLog(adir, LA);
     // 23:30 PST on the 14th and 00:30 PST on the 15th land in different files.
-    log.record({ at: '2026-11-15T07:30:00Z', kind: 'reply', outcome: 'ok', channel: 'food', ask: 'save sunrise to dessert', tools: ['places_add'], usage: { ...noUsage('claude-haiku-5-5'), input: 20_000 } });
+    log.record({ at: '2026-11-15T07:30:00Z', kind: 'reply', outcome: 'ok', channel: 'food', ask: 'save tartine to dessert', tools: ['places_add'], usage: { ...noUsage('claude-haiku-5-5'), input: 20_000 } });
     log.record({ at: '2026-11-15T08:30:00Z', kind: 'reply', outcome: 'error', channel: 'travel', ask: 'what time is my flight', error: 'overloaded', messageId: '123' });
     const trace = newTrace();
     traceTools(trace, [{ name: 'fetch_page', content: 'HTTP 403 Forbidden', isError: true }, { name: 'recall', content: 'ok' }]);
@@ -1039,7 +1039,7 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     log.prune(new Date('2027-06-01T00:00:00Z'));
     check('activity: old days are pruned', (await import('node:fs')).readdirSync(adir).length === 0);
 
-    const all = [...back, { at: '2026-11-15T07:30:00Z', kind: 'reply' as const, outcome: 'ok', channel: 'food', ask: 'save sunrise', costUsd: 0.002 }];
+    const all = [...back, { at: '2026-11-15T07:30:00Z', kind: 'reply' as const, outcome: 'ok', channel: 'food', ask: 'save tartine', costUsd: 0.002 }];
     const usage = usageSummary(all, LA, 7);
     check('/usage: total, per day and priciest', usage.includes('last 7 days') && usage.includes('2026-11-15') && usage.includes('task "Kyoto hotels"'), usage);
     const digest = reviewDigest(
@@ -1086,11 +1086,11 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     check('brief: notes about missing details are taken out', handoff === '* Hand off to @alex at the card shop: purple Riven AA\n* the card shop handoff to @alex today: red Pyke AA\n* Dinner.\n* No time set? Fine.', handoff);
     // The 17 Nov brief pasted a three-day forecast and a note about reading the page.
     const pasted = dropWeatherJunk(
-      '☀️ Good morning! Springfield is forecast for a high of 61° and a low of 52° today. Springfield, OR Sun 11/15 66° 51°; Mon 11/16 59° 43°; Tue 11/17 61° 52° (reading inferred from the layout)\nIn downtown Portland, breaks of sun are expected, with a high of 61° and a low of 46°.\n\n**Inbox**\n* [main] UPS: due 11/17 between 11 AM and 1 PM.',
+      '☀️ Good morning! Springfield is forecast for a high of 61° and a low of 52° today. Springfield, OR Sun 11/15 66° 51°; Mon 11/16 59° 43°; Tue 11/17 61° 52° (reading inferred from the layout)\nIn the Financial District, breaks of sun are expected, with a high of 61° and a low of 46°.\n\n**Inbox**\n* [main] UPS: due 11/17 between 11 AM and 1 PM.',
     );
     check(
       'brief: a pasted multi-day forecast is taken out of the weather, not the rest',
-      pasted === '☀️ Good morning! Springfield is forecast for a high of 61° and a low of 52° today.\nIn downtown Portland, breaks of sun are expected, with a high of 61° and a low of 46°.\n\n**Inbox**\n* [main] UPS: due 11/17 between 11 AM and 1 PM.',
+      pasted === '☀️ Good morning! Springfield is forecast for a high of 61° and a low of 52° today.\nIn the Financial District, breaks of sun are expected, with a high of 61° and a low of 46°.\n\n**Inbox**\n* [main] UPS: due 11/17 between 11 AM and 1 PM.',
       pasted,
     );
     const mailbox = (name: string) =>
@@ -1099,7 +1099,7 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     const mainBox = { ...(mailbox('main') as object), extraMail: [workBox], mailboxes: () => [mainBox, workBox] } as never;
     const twoInboxes = await briefFacts({ timeZone: LA, reminders: rs, journal: bj, google: mainBox }, nineAm);
     check('brief: every Gmail account gets its own inbox facts, with the email text', twoInboxes.includes('Inbox (main account)') && twoInboxes.includes('Inbox (work account)') && twoInboxes.includes('work: payment due on Nov 20'), twoInboxes);
-    check('brief: on a weekday the weather is Springfield and Portland by 100 Main St', briefWeatherPlaces(new Date('2026-11-16T17:00:00Z'), LA).join('|') === 'Springfield, OR|Portland, OR 97204 (around 100 Main St)' && monday.includes('Monday, November 16'), monday);
+    check('brief: on a weekday the weather is Springfield and SF by Union Square', briefWeatherPlaces(new Date('2026-11-16T17:00:00Z'), LA).join('|') === 'Springfield, OR|San Francisco, CA (around Union Square)' && monday.includes('Monday, November 16'), monday);
     // Friday 11:30 PM in LA is already Saturday in UTC; the day is the owner's, not the server's.
     check('brief: weekdays are counted in the owner\'s time zone', briefWeatherPlaces(new Date('2026-11-21T07:30:00Z'), LA).length === 2 && briefWeatherPlaces(new Date('2026-11-22T07:30:00Z'), LA).length === 1);
     // Each place's weather is its own small search; only its final sentence reaches the brief, which doesn't search.
@@ -1118,9 +1118,9 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     };
     const written = await writeBrief(briefLlm, { model: 'm', effort: 'low' }, monday, undefined, briefWeatherPlaces(new Date('2026-11-16T17:00:00Z'), LA));
     const final = briefReqs.find((r) => r.maxUses === 0)!;
-    check('brief: weather is looked up per place (100 Main St, then all of Portland), then the brief is written without searching', briefReqs.filter((r) => r.maxUses === 0).length === 1 && briefReqs.filter((r) => r.maxUses > 0).length === 4 && briefReqs.some((r) => r.maxUses > 0 && r.text.includes('Place: Portland, OR.')), JSON.stringify(briefReqs.map((r) => r.maxUses)));
+    check('brief: weather is looked up per place (Union Square, then all of SF), then the brief is written without searching', briefReqs.filter((r) => r.maxUses === 0).length === 1 && briefReqs.filter((r) => r.maxUses > 0).length === 4 && briefReqs.some((r) => r.maxUses > 0 && r.text.includes('Place: San Francisco, CA.')), JSON.stringify(briefReqs.map((r) => r.maxUses)));
     check('brief: the weather goes on top in code, only the final sentence, and NONE is left out', written.text === 'Good morning! Sunny in Springfield today, high 61°, low 52°.\n\nBRIEF' && !final.text.includes('Sunny'), written.text);
-    check('brief: a place with no weather is reported for the activity log', written.missed.join('|') === 'Portland, OR 97204 (around 100 Main St)', written.missed.join('|'));
+    check('brief: a place with no weather is reported for the activity log', written.missed.join('|') === 'San Francisco, CA (around Union Square)', written.missed.join('|'));
     const sfLlm: LLM = {
       retryable: () => false,
       async generate(_m, req) {
@@ -1128,12 +1128,12 @@ check('web search is localised to home', search.user_location?.city === 'Springf
         const say = (t: string) => ({ stop: 'done' as const, text: t, calls: [], sources: new Sources(), turn: { role: 'assistant' as const, text: t } });
         if (req.web.maxUses === 0) return say('**Today**\n* Dinner');
         if (text.includes('Springfield')) return say('Rainy in Springfield today, high 58°, low 51°, with a 100% chance of rain.');
-        if (text.includes('97204')) return say('NONE');
-        return say('Rainy in Portland today, high 57°, low 50°, with a 90% chance of rain.');
+        if (text.includes('Union Square')) return say('NONE');
+        return say('Rainy in San Francisco today, high 57°, low 50°, with a 90% chance of rain.');
       },
     };
     const sf = await writeBrief(sfLlm, { model: 'm', effort: 'low' }, monday, undefined, briefWeatherPlaces(new Date('2026-11-18T18:30:00Z'), LA));
-    check('brief: when 97204 has no forecast, Portland\'s is used, on its own line under the greeting', sf.text === 'Good morning! Rainy in Springfield today, high 58°, low 51°, with a 100% chance of rain.\nRainy in Portland today, high 57°, low 50°, with a 90% chance of rain.\n\n**Today**\n* Dinner' && sf.missed.length === 0, sf.text);
+    check('brief: when Union Square has no forecast, SF\'s is used, on its own line under the greeting', sf.text === 'Good morning! Rainy in Springfield today, high 58°, low 51°, with a 100% chance of rain.\nRainy in San Francisco today, high 57°, low 50°, with a 90% chance of rain.\n\n**Today**\n* Dinner' && sf.missed.length === 0, sf.text);
     check('brief: with no weather it just greets', briefGreeting([]) === 'Good morning!');
 
     // Items the owner drops stay out of later briefs, and survive a restart.

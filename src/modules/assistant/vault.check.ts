@@ -32,8 +32,8 @@ const temp = () => new Vault(mkdtempSync(join(tmpdir(), 'squire-vault-')));
 {
   const vault = temp();
   try {
-    vault.write('Cafes/Fogline.md', 'Good pour-over.\n');
-    vault.write('Cafes/Ridge Coffee.md', '---\ntype: favourite\n---\nMine.\n');
+    vault.write('Cafes/Blue Bottle.md', 'Good pour-over.\n');
+    vault.write('Cafes/Verve.md', '---\ntype: favourite\n---\nMine.\n');
     vault.write('Travel/Japan/Tokyo food.md', 'Places to eat.\n');
     vault.write('Travel/Japan/Japan itinerary v2.md', '---\ntrip: somewhere else\n---\nDay 1.\n');
     vault.write('Travel/Chicago/Chicago.md', '# Chicago\n\nMy hub.\n');
@@ -48,8 +48,8 @@ const temp = () => new Vault(mkdtempSync(join(tmpdir(), 'squire-vault-')));
     const plan = planMigration(vault, LA);
     const lines = plan.map(describe);
     check('the migration is a dry run until applied', vault.list().every((p) => before.some(([b, t]) => b === p && t === vault.read(p))) && vault.list().length === before.length);
-    check('folders give a missing type', lines.some((l) => l.includes('Cafes/Fogline.md: type: place, category: cafe')) && lines.some((l) => l.includes('proj-ideas/Squire.md: type: project')), lines.join('\n'));
-    check('a type the owner set is left alone', !lines.some((l) => l.includes('Cafes/Ridge Coffee.md')));
+    check('folders give a missing type', lines.some((l) => l.includes('Cafes/Blue Bottle.md: type: place, category: cafe')) && lines.some((l) => l.includes('proj-ideas/Squire.md: type: project')), lines.join('\n'));
+    check('a type the owner set is left alone', !lines.some((l) => l.includes('Cafes/Verve.md')));
     check('trip notes link to their trip, unless set', lines.some((l) => l === 'add fields  Travel/Japan/Tokyo food.md: trip: [[Travel/Japan/Japan]]') && !lines.some((l) => l.includes('itinerary v2.md: trip')));
     check('a trip without a hub gets one, an existing hub only a type', lines.some((l) => l === 'create      Travel/Japan/Japan.md (index note)') && lines.some((l) => l === 'add fields  Travel/Chicago/Chicago.md: type: trip') && !lines.some((l) => l.startsWith('create      Travel/Chicago/Chicago.md')));
     check('typed loose notes move home, with a redirect if path-linked', lines.includes('move        notes/Jane.md -> People/Jane.md') && lines.some((l) => l.startsWith('move        notes/Bob.md -> People/Bob.md (redirect')));
@@ -57,10 +57,10 @@ const temp = () => new Vault(mkdtempSync(join(tmpdir(), 'squire-vault-')));
     const hub = plan.find((c) => c.kind === 'create' && c.path === 'Travel/Japan/Japan.md');
     check('the hub has a versions table', !!hub && hub.kind === 'create' && hub.content.includes('| [[Travel/Japan/Japan itinerary v2]] | v2 |') && hub.content.includes('type: trip'), hub && 'content' in hub ? hub.content : '');
 
-    vault.write('Cafes/Fogline.md', '---\ncategory: bakery\n---\nGood pour-over.\n');
+    vault.write('Cafes/Blue Bottle.md', '---\ncategory: bakery\n---\nGood pour-over.\n');
     const { done, skipped, log } = applyMigration(vault, plan, LA);
-    const bb = noteFields(vault.read('Cafes/Fogline.md')!);
-    check('apply re-checks fields the owner set since', bb.type === 'place' && bb.category === 'bakery' && vault.read('Cafes/Fogline.md')!.endsWith('Good pour-over.\n'));
+    const bb = noteFields(vault.read('Cafes/Blue Bottle.md')!);
+    check('apply re-checks fields the owner set since', bb.type === 'place' && bb.category === 'bakery' && vault.read('Cafes/Blue Bottle.md')!.endsWith('Good pour-over.\n'));
     check('apply moves and leaves redirects', vault.read('People/Jane.md') !== undefined && vault.read('notes/Jane.md') === undefined && noteFields(vault.read('notes/Bob.md') ?? '').type === 'redirect');
     check('apply keeps bodies and writes a log', vault.read('Travel/Japan/Tokyo food.md')!.endsWith('Places to eat.\n') && !!vault.read(log)?.includes('Ontology migration') && vault.read(ONTOLOGY_NOTE) !== undefined, `${done.length} done, ${skipped.join('; ')}`);
     const again = planMigration(vault, LA).map(describe);

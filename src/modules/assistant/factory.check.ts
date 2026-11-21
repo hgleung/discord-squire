@@ -160,7 +160,7 @@ const gen = (calls: ToolCall[]): Generation => ({ stop: calls.length ? 'tool_use
         models.push({ model: m.model, effort: m.effort });
         systems.push(req.system);
         if (req.tools.some((t) => t.name === 'verdict')) return gen([{ id: 'v', name: 'verdict', input: { items: [{ pass: true, why: 'says so' }, { pass: false, why: 'made up a total' }] } }]);
-        return gen([{ id: 'f', name: 'finish_task', input: { outcome: 'done', report: 'Logged $12.50 at Fogline.' } }]);
+        return gen([{ id: 'f', name: 'finish_task', input: { outcome: 'done', report: 'Logged $12.50 at Blue Bottle.' } }]);
       },
     };
     const runner = new TaskRunner(new TaskStore(join(dir, 'tasks.json')), { llm: fake, model: 'big', fastModel: 'small', effort: 'low', timeZone: LA, reminders: new ReminderStore(join(dir, 'r.json'), LA), vault });
@@ -298,11 +298,11 @@ const gen = (calls: ToolCall[]): Generation => ({ stop: calls.length ? 'tool_use
         seenTools.push(req.tools.map((t) => t.name).join());
         const img = req.turns[0]?.role === 'user' ? (req.turns[0].content.find((x) => x.type === 'image') as { url: string; data?: string } | undefined) : undefined;
         const url = img?.data ? img.url : '';
-        if (url.includes('Coffee receipt')) return gen([{ id: 'e', name: 'log_expense', input: { date: '2026-11-18', merchant: 'Fogline Coffee', amount: 20.38, currency: 'USD', category: 'dining', note: '' } }]);
-        if (url.includes('Ramen menu')) return req.turns.length === 1 ? gen([{ id: 'l', name: 'places_lists', input: {} }]) : gen([{ id: 'a', name: 'places_add', input: { query: 'Noodle Lantern, 450 Polk St' } }]);
-        if (url.includes('Concert flyer')) return gen([{ id: 'n', name: 'save_note', input: { title: 'NEON HARBOR', content: 'Jan 9', mode: 'create', folder: 'Squire/Inbox', sources: [] } }]);
+        if (url.includes('Coffee receipt')) return gen([{ id: 'e', name: 'log_expense', input: { date: '2026-11-18', merchant: 'Philz Coffee', amount: 20.38, currency: 'USD', category: 'dining', note: '' } }]);
+        if (url.includes('Ramen menu')) return req.turns.length === 1 ? gen([{ id: 'l', name: 'places_lists', input: {} }]) : gen([{ id: 'a', name: 'places_add', input: { query: 'Mensho Tokyo, 672 Geary St' } }]);
+        if (url.includes('Concert flyer')) return gen([{ id: 'n', name: 'save_note', input: { title: 'ODESZA', content: 'Jan 9', mode: 'create', folder: 'Squire/Inbox', sources: [] } }]);
         if (url.includes('Recipe card')) return gen([{ id: 'r', name: 'save_note', input: { title: 'Banana Bread', content: '- 1/2 cup butter', mode: 'create', folder: 'Recipes/Pastries', sources: ['owner'] } }]);
-        return { ...gen([]), text: 'A night market at Harbor Plaza on Fridays. Which Friday should I add?' };
+        return { ...gen([]), text: 'A night market at Pier 39 on Fridays. Which Friday should I add?' };
       },
     };
     for (const p of vault.list('Factory/Evals/photo')) if (/Gym whiteboard/.test(p)) rmSync(vault.abs(p));

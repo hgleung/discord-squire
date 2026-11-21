@@ -15,7 +15,7 @@ import { toLocalIso, toLocalShort } from './time.js';
  * The morning brief: one message a day with what's on today (calendar,
  * reminders), what's still open from earlier conversations, open decisions
  * for trips further out, and the weather (Springfield every day, plus
- * Portland around 100 Main St (97204) on workdays). Background tasks stay out:
+ * San Francisco around Union Square on workdays). Background tasks stay out:
  * they report on their own. The facts are gathered here; the chat model only
  * words them. The weather is looked up per place and put in by code, so a
  * place can't be dropped while the brief is worded.
@@ -42,9 +42,9 @@ const INBOX_BODY_CHARS = 1500;
 
 /** The brief's weather: always the first place, and the second too on workdays (Mon–Fri in the owner's time zone). */
 export const BRIEF_WEATHER = 'Springfield, OR';
-export const BRIEF_WORKDAY_WEATHER = 'Portland, OR 97204 (around 100 Main St)';
+export const BRIEF_WORKDAY_WEATHER = 'San Francisco, CA (around Union Square)';
 /** When a place's own lookup finds nothing, the wider place it's in; a neighbourhood forecast is often not published. */
-export const WEATHER_FALLBACK: Record<string, string> = { [BRIEF_WORKDAY_WEATHER]: 'Portland, OR' };
+export const WEATHER_FALLBACK: Record<string, string> = { [BRIEF_WORKDAY_WEATHER]: 'San Francisco, CA' };
 
 /** The brief's own posts start with this, which is how the journal tells them from replies. */
 export const BRIEF_MARK = '☀️';
@@ -139,13 +139,13 @@ export async function briefFacts(src: BriefSources, now = new Date()): Promise<s
   return parts.join('\n\n');
 }
 
-/** The places whose weather goes in the brief: Springfield daily, and Portland around 100 Main St (97204, where the owner works) on weekdays. */
+/** The places whose weather goes in the brief: Springfield daily, and San Francisco around Union Square (where the owner works) on weekdays. */
 export function briefWeatherPlaces(now: Date, timeZone: string): string[] {
   const weekday = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(now);
   return ['Sat', 'Sun'].includes(weekday) ? [BRIEF_WEATHER] : [BRIEF_WEATHER, BRIEF_WORKDAY_WEATHER];
 }
 
-const WEATHER_SYSTEM = `You look up one place's weather for a morning brief. Search the web, then answer with exactly one sentence and nothing else: today's weather there, with the kind of day (sunny, cloudy, foggy, rainy…), the high and the low in °F, e.g. "Sunny in Springfield today, high 64°, low 45°." When rain is forecast, add its chance ("60% chance of rain"); otherwise don't mention rain. Today only: never other days, a table or an outlook, even when the page shows them. Name the place as given, in short ("Springfield", "Portland"). If you can't find today's forecast, answer only: NONE`;
+const WEATHER_SYSTEM = `You look up one place's weather for a morning brief. Search the web, then answer with exactly one sentence and nothing else: today's weather there, with the kind of day (sunny, cloudy, foggy, rainy…), the high and the low in °F, e.g. "Sunny in Springfield today, high 64°, low 45°." When rain is forecast, add its chance ("60% chance of rain"); otherwise don't mention rain. Today only: never other days, a table or an outlook, even when the page shows them. Name the place as given, in short ("Springfield", "SF"). If you can't find today's forecast, answer only: NONE`;
 
 /** One place's weather for today as one sentence, from its own small search; undefined when nothing was found. */
 export async function weatherSentence(
