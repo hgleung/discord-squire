@@ -13,6 +13,137 @@ It's built as a small set of independent modules — each a directory under `src
 
 The training log and music are slash commands. The assistant is the one part that reads plain messages, so it needs Discord's Message Content intent, and the bot only asks for it while the assistant is switched on. It holds an outbound WebSocket to Discord — no inbound port, no tunnel, nothing hosted.
 
+## How it fits together
+
+The bot runtime routes Discord events to each module. The assistant, the job factories, the nightly vault upkeep and the training log all keep their state as notes in your Obsidian vault.
+
+```mermaid
+flowchart TD
+    User((Discord user)):::ext
+    Discord((Discord)):::ext
+    Browser((Browser)):::ext
+    YT((YouTube audio)):::ext
+    Anthropic((Anthropic API)):::ext
+    GoogleAPI((Gmail / Calendar / Maps)):::ext
+    Ollama((Local Ollama<br/>and Whisper)):::ext
+
+    User -->|sends messages and commands| Discord
+    User -->|logs workouts| Browser
+
+    subgraph Runtime["Bot runtime"]
+        Startup["Bot startup<br/>[index.ts]"]:::core
+        Router["Command routing<br/>[bot.ts]"]:::core
+        Http["Training HTTP server<br/>[training/http.ts]"]:::core
+    end
+
+    Discord -->|delivers events| Router
+    Startup -->|starts| Http
+    Startup -.->|registers all modules| Router
+    Vault[("Obsidian vault<br/>[vault.ts]")]:::core
+
+    subgraph System["System"]
+        Update["/update, restart<br/>[system/index.ts]"]:::sys
+    end
+
+    subgraph Music["Music"]
+        MusicCmd["Music commands<br/>[music/index.ts]"]:::music
+        Player["Audio player<br/>[player.ts]"]:::music
+    end
+
+    Router -->|dispatches| Update
+    Router -->|dispatches| MusicCmd
+    MusicCmd -->|controls playback| Player
+    Player -.->|streams audio| YT
+
+    subgraph Assistant["Assistant"]
+        Chat["Chat module<br/>[assistant/index.ts]"]:::asst
+        Agent["Chat agent<br/>[agent.ts]"]:::asst
+        LLM["Model layer<br/>[llm.ts, anthropic.ts]"]:::asst
+        Tools["Tools: notes, reminders,<br/>calendar, places, video"]:::asst
+        Tasks["Background tasks<br/>[tasks.ts]"]:::asst
+        Brief["Morning brief and weekly review<br/>[brief.ts, weekly.ts]"]:::asst
+        Inbox["Inbox events to calendar<br/>[inboxEvents.ts]"]:::asst
+        Memory[("Memory, journal, reminders,<br/>activity log [data/]")]:::asst
+        Style["Voice and style<br/>[voice.ts, style.ts]"]:::asst
+        Semantic["Search by meaning<br/>[semantic.ts]"]:::asst
+    end
+
+    Router -->|dispatches| Chat
+    Chat -->|invokes| Agent
+    Chat -->|starts tasks| Tasks
+    Chat -->|generates| Brief
+    Chat -->|keeps| Memory
+    Chat -->|learns owner's voice| Style
+    Brief -->|adds booked events| Inbox
+    Agent -->|uses| Tools
+    Tasks -->|run| Tools
+    Agent --> LLM
+    Tasks --> LLM
+    LLM -.->|requests completion| Anthropic
+    Tools -.->|calls| GoogleAPI
+    Inbox -.->|reads mail, writes events| GoogleAPI
+    Tools -->|reads and writes notes| Vault
+    Semantic -.->|embeds| Ollama
+    Chat -.->|transcribes voice notes| Ollama
+    Chat -->|related past chats| Semantic
+
+    subgraph Factory["Job factories"]
+        Jobs["Jobs, prompts, shadow mode<br/>[factory.ts, codeJobs.ts]"]:::fact
+        Gov["Spend caps and registry<br/>[governance.ts, factoryDigest.ts]"]:::fact
+        Evals["Evals and improve loop<br/>[evals.ts, improve.ts]"]:::fact
+    end
+
+    Tasks -->|loads job prompt| Jobs
+    Inbox -->|loads job prompt| Jobs
+    Tasks -->|checks cap| Gov
+    Jobs -->|Factory/ notes| Vault
+    Gov -->|Registry.md| Vault
+    Evals -->|cases and results| Vault
+
+    subgraph Upkeep["Vault upkeep (nightly)"]
+        Sync["Read-only syncs<br/>[sync.ts]"]:::upk
+        Lint["Lint, health, migrations<br/>[vaultLint.ts, vaultHealth.ts]"]:::upk
+    end
+
+    Chat -->|schedules| Sync
+    Sync --> Lint
+    Sync -.->|reads| GoogleAPI
+    Sync -->|Squire/Sync/| Vault
+    Lint -->|Squire/Health/| Vault
+
+    subgraph Training["Training log"]
+        TrainCmd["Training commands<br/>[training/index.ts]"]:::train
+        Service["Workout service<br/>[service.ts]"]:::train
+        Store[("Plan storage<br/>[store.ts]")]:::train
+        Lib["Shared plan logic [lib/]:<br/>planOps, scoring, weekSummary,<br/>muscles, dateUtils"]:::train
+        WebUI["Training web UI<br/>[App.tsx]"]:::train
+        UsePlan["Plan sync hook<br/>[usePlan.ts]"]:::train
+        Api["Plan API client<br/>[api.ts]"]:::train
+    end
+
+    Router -->|dispatches| TrainCmd
+    TrainCmd -->|handles commands| Service
+    Tools -->|answers gym queries, logs sets| Service
+    Service -->|reads and updates| Store
+    Service -->|uses| Lib
+    Store -->|persists plan as markdown| Vault
+    Browser --> WebUI
+    WebUI -->|uses plan state| UsePlan
+    WebUI -->|uses| Lib
+    UsePlan -->|fetches and saves| Api
+    Api -->|HTTP| Http
+    Http -->|reads and writes| Store
+
+    classDef ext fill:#e3e8ff,stroke:#3b4cca,color:#1a237e
+    classDef core fill:#dbe9ff,stroke:#2b6cd9,color:#0b2a5b
+    classDef sys fill:#ececec,stroke:#777,color:#222
+    classDef music fill:#ffe0e6,stroke:#d6234a,color:#7a0f27
+    classDef asst fill:#fff2cc,stroke:#d68a00,color:#5c3b00
+    classDef fact fill:#f3e0ff,stroke:#8e3ad6,color:#3f0f6b
+    classDef upk fill:#e0f7f7,stroke:#1a9a9a,color:#0b4545
+    classDef train fill:#dcfbe6,stroke:#22a05a,color:#0d4a28
+```
+
 ## Running it
 
 ```bash
