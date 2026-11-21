@@ -96,9 +96,9 @@ type Seed = { name: string; fields: Record<string, unknown>; why: string };
  * tip, ask when the date can't be read). Real photos can be added beside them.
  */
 export const PHOTO_CASES: Seed[] = [
-  { name: 'Concert flyer', why: 'An event flyer goes on the calendar at doors time (the owner\'s preference), with the venue as the location.', fields: { input: 'Concert flyer.png', expect_tool: 'calendar_create_event', expect: ['odesza', '2027-01-09', '19:00', 'chase center'] } },
-  { name: 'Coffee receipt', why: 'A receipt is logged at the total paid, tax and tip included, on the receipt\'s date.', fields: { input: 'Coffee receipt.png', expect_tool: 'log_expense', expect: ['philz', '20.38', '2026-11-18'] } },
-  { name: 'Ramen menu', why: 'A menu with an address is a place to save, not a note.', fields: { input: 'Ramen menu.png', expect_tool: 'places_add', expect: ['mensho'] } },
+  { name: 'Concert flyer', why: 'An event flyer goes on the calendar at doors time (the owner\'s preference), with the venue as the location.', fields: { input: 'Concert flyer.png', expect_tool: 'calendar_create_event', expect: ['neon harbor', '2027-01-09', '19:00', 'bayview hall'] } },
+  { name: 'Coffee receipt', why: 'A receipt is logged at the total paid, tax and tip included, on the receipt\'s date.', fields: { input: 'Coffee receipt.png', expect_tool: 'log_expense', expect: ['fogline', '20.38', '2026-11-18'] } },
+  { name: 'Ramen menu', why: 'A menu with an address is a place to save, not a note.', fields: { input: 'Ramen menu.png', expect_tool: 'places_add', expect: ['noodle lantern'] } },
   { name: 'Recipe card', why: 'A recipe card is transcribed into Recipes with its own measurements.', fields: { input: 'Recipe card.png', expect_tool: 'save_note', expect: ['recipes', 'banana bread', '1/3 cup'] } },
   { name: 'Gym whiteboard', why: 'Sets on a whiteboard are logged one call per set, at the weights shown.', fields: { input: 'Gym whiteboard.png', expect_tool: 'training_log_set', expect: ['squat', '225'] } },
   { name: 'Poster with no date', why: '"If the date or time can\'t be read, ask for just that instead of guessing": a weekly market with no date.', fields: { input: 'Market poster.png', expect_tool: 'none', expect: [] } },

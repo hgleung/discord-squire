@@ -596,7 +596,7 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     name,
     note ?? '',
   ];
-  const payload = `)]}'\n${JSON.stringify([[null, null, null, null, 'Dessert', null, null, null, [entry('Tartine Bakery', '600 Guerrero St, SF', 37.7614, -122.4241, 'morning bun'), entry('Bi-Rite Creamery', '3692 18th St, SF', 37.7616, -122.4257)]]])}`;
+  const payload = `)]}'\n${JSON.stringify([[null, null, null, null, 'Dessert', null, null, null, [entry('Sunrise Bakery', '600 Guerrero St, SF', 37.7614, -122.4241, 'morning bun'), entry('Scoop Creamery', '3692 18th St, SF', 37.7616, -122.4257)]]])}`;
   const parsed = parseListResponse(payload);
   check('shared list: title and places parsed', parsed.title === 'Dessert' && parsed.places.length === 2, JSON.stringify(parsed.places[0]));
   check('shared list: coordinates, address, note, cid', parsed.places[0]!.location?.lat === 37.7614 && parsed.places[0]!.note === 'morning bun' && parsed.places[0]!.cid === '0x80858:0x1a2b' && !parsed.places[1]!.note);
@@ -626,9 +626,9 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     const places = new SavedPlaces({ file: join(pdir, 'places.json'), listUrls: [] });
     places.store.data.lists = [{ url: 'u1', name: 'Dessert' }, { url: 'u2', name: 'Bars' }];
     places.store.data.places = [
-      { key: 'c1', list: 'Dessert', name: 'Tartine Bakery', location: { lat: 37.7614, lng: -122.4241 }, note: 'morning bun', source: 'list', details: hours },
-      { key: 'c2', list: 'Dessert', name: 'Bi-Rite Creamery', location: { lat: 37.7616, lng: -122.4257 }, source: 'list' },
-      { key: 'c3', list: 'Bars', name: 'Trick Dog', location: { lat: 37.759, lng: -122.4114 }, source: 'list', details: { ...hours, periods: [] } },
+      { key: 'c1', list: 'Dessert', name: 'Sunrise Bakery', location: { lat: 37.7614, lng: -122.4241 }, note: 'morning bun', source: 'list', details: hours },
+      { key: 'c2', list: 'Dessert', name: 'Scoop Creamery', location: { lat: 37.7616, lng: -122.4257 }, source: 'list' },
+      { key: 'c3', list: 'Bars', name: 'Lantern Bar', location: { lat: 37.759, lng: -122.4114 }, source: 'list', details: { ...hours, periods: [] } },
       { key: 'chat-1', list: 'Dessert', name: 'Dandelion Chocolate', location: { lat: 37.7609, lng: -122.4214 }, source: 'chat' },
     ];
     // "home" and a named area resolve from the remembered geocodes; no API here.
@@ -649,18 +649,18 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     check('a full page says how to get the next', page1.includes('offset 1'), page1);
     const page2 = await find({ limit: 1, offset: 1 });
     check('offset pages on without repeating', !page2.includes(page1.split(' · ')[0]!) && page2.includes('offset 2'), page2);
-    const rest = await find({ exclude: ['tartine', 'BI-RITE'] });
-    check('exclude drops visited names', !rest.includes('Tartine') && !rest.includes('Bi-Rite') && rest.includes('Trick Dog'), rest);
+    const rest = await find({ exclude: ['sunrise', 'SCOOP'] });
+    check('exclude drops visited names', !rest.includes('Sunrise') && !rest.includes('Scoop') && rest.includes('Lantern Bar'), rest);
     check('offset past the end says so', (await find({ offset: 50 })).startsWith('Nothing past 50'));
 
     const dessert = await find({ list: 'des' });
-    check('a list prefix picks the list', dessert.includes('Tartine') && !dessert.includes('Trick Dog'), dessert);
-    check('the owner\'s note is searchable', (await find({ text: 'bun' })).startsWith('Tartine Bakery'));
+    check('a list prefix picks the list', dessert.includes('Sunrise') && !dessert.includes('Lantern Bar'), dessert);
+    check('the owner\'s note is searchable', (await find({ text: 'bun' })).startsWith('Sunrise Bakery'));
     const near = await find({ near: 'Mission Dolores', within_miles: 0.25 });
-    check('near a place: nearest first, radius applied', near.split('\n')[1]?.startsWith('Bi-Rite') === true && !near.includes('Trick Dog'), near);
+    check('near a place: nearest first, radius applied', near.split('\n')[1]?.startsWith('Scoop') === true && !near.includes('Lantern Bar'), near);
     check('distances are shown in miles', / \d+\.\d mi · /.test(near) && !near.includes(' km'), near);
     const open = await find({ open_now: true });
-    check('open now keeps only known-open spots and counts the unknown', open.includes('Tartine') && !open.includes('Bi-Rite') && open.includes('3 matching places left out'), open);
+    check('open now keeps only known-open spots and counts the unknown', open.includes('Sunrise') && !open.includes('Scoop') && open.includes('3 matching places left out'), open);
     check('removing a Google list entry is refused', fail('places_remove', { key: 'c1' }).includes('remove it there'));
     await tools.get('places_remove')!.run({ key: 'chat-1' });
     check('a chat-added place can be removed', !new SavedPlaces({ file: join(pdir, 'places.json'), listUrls: [] }).places().some((p) => p.key === 'chat-1'));
@@ -673,11 +673,11 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     const sf = { lat: 37.7749, lng: -122.4194 };
     const fakeHit = (name: string, location: { lat: number; lng: number }) => ({ name, address: name, location, details: { placeId: name, fetchedAt: '' } });
     const withApi = places as unknown as { api?: { find: (q: string) => Promise<unknown> } };
-    withApi.api = { find: async (q) => (q.startsWith('F1rst') ? fakeHit('The F1rst Take, Salem', { lat: 37.3382, lng: -121.8863 }) : fakeHit('Bar Shoji, New Montgomery', { lat: 37.7867, lng: -122.3998 })) };
+    withApi.api = { find: async (q) => (q.startsWith('F1rst') ? fakeHit('The F1rst Take, Salem', { lat: 37.3382, lng: -121.8863 }) : fakeHit('Bar Hikari, New Montgomery', { lat: 37.7867, lng: -122.3998 })) };
     const farMatch = await places.add('Bars', 'F1rst Take', sf).then(() => '', (err: Error) => err.message);
     check('a match far from the area asked for is not saved', farMatch.startsWith('Not saved') && farMatch.includes('Salem') && !places.places().some((p) => p.name.includes('F1rst')), farMatch);
-    const nearMatch = await places.add('Bars', 'Shoji', sf);
-    check('a match in the area asked for is saved', nearMatch.name.startsWith('Bar Shoji'));
+    const nearMatch = await places.add('Bars', 'Hikari', sf);
+    check('a match in the area asked for is saved', nearMatch.name.startsWith('Bar Hikari'));
     // Seen in #travel, Nov 18: "check locations on each of those" had only web search, and three shops stayed unfound.
     const lookupApi = places as unknown as { api?: { lookup: (q: string) => Promise<unknown[]> } };
     lookupApi.api = {
@@ -1024,7 +1024,7 @@ check('web search is localised to home', search.user_location?.city === 'Springf
 
     const log = new ActivityLog(adir, LA);
     // 23:30 PST on the 14th and 00:30 PST on the 15th land in different files.
-    log.record({ at: '2026-11-15T07:30:00Z', kind: 'reply', outcome: 'ok', channel: 'food', ask: 'save tartine to dessert', tools: ['places_add'], usage: { ...noUsage('claude-haiku-5-5'), input: 20_000 } });
+    log.record({ at: '2026-11-15T07:30:00Z', kind: 'reply', outcome: 'ok', channel: 'food', ask: 'save sunrise to dessert', tools: ['places_add'], usage: { ...noUsage('claude-haiku-5-5'), input: 20_000 } });
     log.record({ at: '2026-11-15T08:30:00Z', kind: 'reply', outcome: 'error', channel: 'travel', ask: 'what time is my flight', error: 'overloaded', messageId: '123' });
     const trace = newTrace();
     traceTools(trace, [{ name: 'fetch_page', content: 'HTTP 403 Forbidden', isError: true }, { name: 'recall', content: 'ok' }]);
@@ -1039,7 +1039,7 @@ check('web search is localised to home', search.user_location?.city === 'Springf
     log.prune(new Date('2027-06-01T00:00:00Z'));
     check('activity: old days are pruned', (await import('node:fs')).readdirSync(adir).length === 0);
 
-    const all = [...back, { at: '2026-11-15T07:30:00Z', kind: 'reply' as const, outcome: 'ok', channel: 'food', ask: 'save tartine', costUsd: 0.002 }];
+    const all = [...back, { at: '2026-11-15T07:30:00Z', kind: 'reply' as const, outcome: 'ok', channel: 'food', ask: 'save sunrise', costUsd: 0.002 }];
     const usage = usageSummary(all, LA, 7);
     check('/usage: total, per day and priciest', usage.includes('last 7 days') && usage.includes('2026-11-15') && usage.includes('task "Kyoto hotels"'), usage);
     const digest = reviewDigest(

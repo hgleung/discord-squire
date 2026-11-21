@@ -172,7 +172,7 @@ export function placesTools(
         input_schema: {
           type: 'object',
           properties: {
-            query: { type: 'string', description: 'The place, with enough to find it: "Blue Door flagship Harajuku Tokyo", "Tartine Bakery San Francisco".' },
+            query: { type: 'string', description: 'The place, with enough to find it: "Blue Door flagship Harajuku Tokyo", "Sunrise Bakery San Francisco".' },
             near: { type: 'string', description: 'City or area to search around ("Harajuku, Tokyo"), or empty string for near home.' },
           },
           required: ['query', 'near'],
@@ -204,7 +204,7 @@ export function placesTools(
           type: 'object',
           properties: {
             list: { type: 'string', description: 'An existing list that fits, e.g. "food".' },
-            query: { type: 'string', description: 'The place to look up, with enough to find it: "Tartine Bakery San Francisco".' },
+            query: { type: 'string', description: 'The place to look up, with enough to find it: "Sunrise Bakery San Francisco".' },
             near: { type: 'string', description: 'Area to search around ("home" or a place), or empty string for near home.' },
             note: { type: 'string', description: 'Why they saved it ("get the morning bun"), or empty string.' },
             new_list: { type: 'boolean', description: 'True only when the owner asked for a new list by that name.' },
